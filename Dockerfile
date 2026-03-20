@@ -1,6 +1,7 @@
 FROM debian:bookworm-slim AS brotli-wasm-builder
 WORKDIR /workspace
-RUN apt-get update && \
+RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
     apt-get install -y cmake make git lbzip2 python3 xz-utils && \
     git clone https://github.com/emscripten-core/emsdk.git && \
     cd emsdk && \
@@ -25,14 +26,25 @@ FROM scratch AS brotli-library-export
 COPY --from=brotli-library-builder /workspace/install/ /
 
 FROM node:24.4.1-bookworm-slim AS contracts-builder
-RUN apt-get update && \
+RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
     apt-get install -y git python3 make g++ curl
-RUN curl -L https://foundry.paradigm.xyz | bash && . ~/.bashrc && ~/.foundry/bin/foundryup -i 1.2.3
+RUN curl --retry 10 --retry-delay 3 --retry-all-errors -L https://foundry.paradigm.xyz | bash && . ~/.bashrc && ~/.foundry/bin/foundryup -i 1.2.3
 WORKDIR /workspace
 COPY contracts-legacy/package.json contracts-legacy/yarn.lock contracts-legacy/
-RUN cd contracts-legacy && yarn install
+RUN yarn config set registry https://registry.npmmirror.com && \
+    yarn config set network-timeout 600000 -g && \
+    yarn config set network-concurrency 1 -g && \
+    yarn config set proxy http://192.168.89.1:7890 -g && \
+    yarn config set https-proxy http://192.168.89.1:7890 -g && \
+    cd contracts-legacy && yarn install --network-timeout 600000 --network-concurrency 1
 COPY contracts/package.json contracts/yarn.lock contracts/
-RUN cd contracts && yarn install
+RUN yarn config set registry https://registry.npmmirror.com && \
+    yarn config set network-timeout 600000 -g && \
+    yarn config set network-concurrency 1 -g && \
+    yarn config set proxy http://192.168.89.1:7890 -g && \
+    yarn config set https-proxy http://192.168.89.1:7890 -g && \
+    cd contracts && yarn install --network-timeout 600000 --network-concurrency 1
 COPY contracts-legacy contracts-legacy/
 COPY contracts-local contracts-local/
 COPY contracts contracts/
@@ -122,10 +134,11 @@ COPY --from=prover-header-builder /workspace/target/ /
 
 FROM rust:1.88.0-slim-bookworm AS prover-builder
 WORKDIR /workspace
-RUN export DEBIAN_FRONTEND=noninteractive && \
+RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -y make wget gpg software-properties-common zlib1g-dev libstdc++-12-dev wabt
-RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+RUN wget --tries=10 -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
     add-apt-repository 'deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-15 main' && \
     apt-get update && \
     apt-get install -y llvm-15-dev libclang-common-15-dev
@@ -218,11 +231,13 @@ ARG modified=""
 ENV NITRO_VERSION=$version
 ENV NITRO_DATETIME=$datetime
 ENV NITRO_MODIFIED=$modified
-RUN export DEBIAN_FRONTEND=noninteractive && \
+RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -y wabt
 COPY go.mod go.sum ./
 COPY go-ethereum/go.mod go-ethereum/go.sum go-ethereum/
+ENV GOPROXY=https://goproxy.cn,direct
 RUN go mod download
 COPY . ./
 COPY --from=contracts-builder workspace/contracts/build/ contracts/build/
