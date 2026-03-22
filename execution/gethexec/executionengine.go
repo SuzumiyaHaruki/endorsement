@@ -54,6 +54,10 @@ import (
 	"github.com/offchainlabs/nitro/util/containers"
 	"github.com/offchainlabs/nitro/util/sharedmetrics"
 	"github.com/offchainlabs/nitro/util/stopwaiter"
+
+	// new
+	"github.com/offchainlabs/nitro/endorsementpolicy"
+	"github.com/offchainlabs/nitro/endorsement"
 )
 
 var (
@@ -218,6 +222,10 @@ type ExecutionEngine struct {
 	addressChecker               state.AddressChecker
 	eventFilter                  *eventfilter.EventFilter
 	transactionFiltererRPCClient *TransactionFiltererRPCClient
+
+	// new
+	candidateBlockEndorser  endorsement.EndorsementManager
+	policyConfig           *endorsementpolicy.PolicyConfig
 }
 
 func NewL1PriceData() *L1PriceData {
@@ -667,6 +675,10 @@ func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.
 		s.exposeMultiGas,
 	)
 	if err != nil {
+		return nil, err
+	}
+	// new
+	if err := s.processCandidateBlockEndorsement(s.GetContext(), block, receipts, hooks); err != nil {
 		return nil, err
 	}
 	blockCalcTime := time.Since(startTime)
@@ -1349,3 +1361,93 @@ func (s *ExecutionEngine) IsTxHashInOnchainFilter(txHash common.Hash) (bool, err
 
 	return arbState.FilteredTransactions().IsFiltered(txHash)
 }
+
+// new
+func (s *ExecutionEngine) processCandidateBlockEndorsement(
+	ctx context.Context,
+	block *types.Block,
+	receipts types.Receipts,
+	hooks *FullSequencingHooks,
+) error {
+	if block == nil || hooks == nil {
+		return nil
+	}
+
+	candidateBlock := hooks.CandidateBlock()
+	if candidateBlock == nil {
+		return nil
+	}
+
+	candidateBlock.Block = block
+	candidateBlock.ParentHash = block.ParentHash()
+	candidateBlock.BlockHash = block.Hash()
+	candidateBlock.BlockNum = block.NumberU64()
+
+	if err := candidateBlock.AttachReceipts(receipts); err != nil {
+		return err
+	}
+
+	if s.candidateBlockEndorser == nil || s.policyConfig == nil {
+		// mock阶段只打日志
+		for _, tx := range candidateBlock.Txs {
+			log.Debug(
+				"mock endorsement stage sees candidate tx",
+				"l2Block", block.NumberU64(),
+				"txIndex", tx.TxIndex,
+				"txHash", tx.Tx.Hash(),
+				"policyID", tx.Policy.Policy.ID,
+				"threshold", tx.Policy.Policy.Threshold,
+				"hasReceipt", tx.Receipt != nil,
+			)
+		}
+		return nil
+	}
+
+	// 转成 endorsement 包的 CandidateBlockInput
+	input := &endorsement.CandidateBlockInput{
+		BlockHash:  candidateBlock.BlockHash,
+		ParentHash: candidateBlock.ParentHash,
+		BlockNum:   candidateBlock.BlockNum,
+		Txs:        make([]*endorsement.CandidateTxInput, 0, len(candidateBlock.Txs)),
+	}
+	for _, tx := range candidateBlock.Txs {
+		input.Txs = append(input.Txs, &endorsement.CandidateTxInput{
+			TxIndex: tx.TxIndex,
+			Tx:      tx.Tx,
+			Receipt: tx.Receipt,
+			Policy:  tx.Policy,
+		})
+	}
+
+	decision, err := s.candidateBlockEndorser.ProcessCandidateBlock(ctx, s.policyConfig, input)
+	if err != nil {
+		return err
+	}
+
+	if !decision.AllSatisfied {
+		log.Warn(
+			"candidate block endorsement failed",
+			"l2Block", block.NumberU64(),
+			"failedTxIndexes", decision.Rebuild.FailedTxIndexes,
+			"failedTxHashes", decision.Rebuild.FailedTxHashes,
+		)
+		// Sequencer 外层处理重建
+	}
+
+	return nil
+}
+
+func (s *ExecutionEngine) SetCandidateBlockEndorser(m endorsement.EndorsementManager) {
+	if s.candidateBlockEndorser != nil {
+		panic("candidateBlockEndorser already set")
+	}
+	s.candidateBlockEndorser = m
+}
+
+func (s *ExecutionEngine) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
+	if s.policyConfig != nil {
+		panic("policyConfig already set")
+	}
+	s.policyConfig = cfg
+}
+

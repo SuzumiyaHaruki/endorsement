@@ -44,6 +44,10 @@ import (
 	"github.com/offchainlabs/nitro/util/rpcclient"
 	"github.com/offchainlabs/nitro/util/rpcserver"
 	"github.com/offchainlabs/nitro/util/stopwaiter"
+
+	// new
+	"github.com/offchainlabs/nitro/endorsementpolicy"
+	"github.com/offchainlabs/nitro/endorsement"
 )
 
 type StylusTargetConfig struct {
@@ -277,6 +281,20 @@ func CreateExecutionNode(
 	config := configFetcher.Get()
 
 	execEngine := NewExecutionEngine(l2BlockChain, syncTillBlock, config.ExposeMultiGas)
+	// new
+	mgr := &endorsement.DefaultEndorsementManager{
+		RequestBuilder:     &endorsement.DefaultRequestBuilder{},
+		Client:             &endorsement.MockEndorsementClient{},
+		Collector:          &endorsement.InMemoryResultCollector{},
+		CertificateBuilder: &endorsement.DefaultCertificateBuilder{},
+		RootBuilder:        &endorsement.DefaultRootBuilder{},
+	}
+
+	execEngine.SetCandidateBlockEndorser(mgr)
+	execEngine.SetPolicyConfig(&endorsementpolicy.PolicyConfig{
+		BlockEndorsementTimeout: 2 * time.Second,
+		MaxRebuildRounds:        3,
+	})
 	if config.EnablePrefetchBlock {
 		execEngine.EnablePrefetchBlock()
 	}
@@ -306,6 +324,31 @@ func CreateExecutionNode(
 		if err != nil {
 			return nil, err
 		}
+
+		// new
+		// 第一版：注入一个静态背书策略解析器
+		sequencer.SetPolicyResolver(&endorsementpolicy.StaticResolver{
+			DefaultPolicy: &endorsementpolicy.EndorsementPolicy{
+				ID: "default",
+				Endorsers: endorsementpolicy.EndorserSet{
+					Members: []endorsementpolicy.EndorserMember{
+						{ID: "A"},
+						{ID: "B"},
+						{ID: "C"},
+					},
+				},
+				Threshold:       2,
+				FailMode:        endorsementpolicy.EndorsementFailDropTxAndRebuild,
+				AggregationType: endorsementpolicy.AggregationIndividualSignatures,
+			},
+		})
+
+		// 第一版：注入全局背书配置（区块级超时）
+		sequencer.SetPolicyConfig(&endorsementpolicy.PolicyConfig{
+			BlockEndorsementTimeout: 2 * time.Second,
+			MaxRebuildRounds:        3,
+		})
+
 		txPublisher = sequencer
 	} else {
 		if config.Forwarder.RedisUrl != "" {

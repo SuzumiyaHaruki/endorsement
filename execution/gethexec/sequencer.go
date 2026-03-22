@@ -45,6 +45,8 @@ import (
 	"github.com/offchainlabs/nitro/util/headerreader"
 	"github.com/offchainlabs/nitro/util/rpcclient"
 	"github.com/offchainlabs/nitro/util/stopwaiter"
+	// new
+	"github.com/offchainlabs/nitro/endorsementpolicy"
 )
 
 var (
@@ -518,6 +520,30 @@ type Sequencer struct {
 
 	eventFilter          *eventfilter.EventFilter
 	addressFilterService *addressfilter.FilterService
+	// new
+	policyResolver endorsementpolicy.PolicyResolver
+	policyConfig   *endorsementpolicy.PolicyConfig
+}
+
+// new
+func (s *Sequencer) SetPolicyResolver(resolver endorsementpolicy.PolicyResolver) {
+	if s.Started() {
+		panic("trying to set policy resolver after start")
+	}
+	if s.policyResolver != nil {
+		panic("trying to set policy resolver when already set")
+	}
+	s.policyResolver = resolver
+}
+
+func (s *Sequencer) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
+	if s.Started() {
+		panic("trying to set policy config after start")
+	}
+	if s.policyConfig != nil {
+		panic("trying to set policy config when already set")
+	}
+	s.policyConfig = cfg
 }
 
 func NewSequencer(execEngine *ExecutionEngine, l1Reader *headerreader.HeaderReader, configFetcher SequencerConfigFetcher, parentChainId *big.Int) (*Sequencer, error) {
@@ -1023,7 +1049,31 @@ type FullSequencingHooks struct {
 	postTxFilter             func(*types.Header, *state.StateDB, *arbosState.ArbosState, *types.Transaction, common.Address, uint64, *core.ExecutionResult) error
 	blockFilter              func(*types.Header, *state.StateDB, types.Transactions, types.Receipts) error
 	txSizeLimitReached       bool
+	// new
+	candidateBlock 			*CandidateBlock
 }
+
+// new
+func (s *FullSequencingHooks) SetCandidateBlock(c *CandidateBlock) {
+	s.candidateBlock = c
+}
+
+func (s *FullSequencingHooks) CandidateBlock() *CandidateBlock {
+	return s.candidateBlock
+}
+
+func (s *FullSequencingHooks) QueueItems() []txQueueItem {
+	return s.queueItems
+}
+
+func (s *FullSequencingHooks) Txes() types.Transactions {
+	txs := make(types.Transactions, 0, len(s.queueItems))
+	for _, item := range s.queueItems {
+		txs = append(txs, item.tx)
+	}
+	return txs
+}
+
 
 func (s *FullSequencingHooks) MessageFromTxes(header *arbostypes.L1IncomingMessageHeader) (*arbostypes.L1IncomingMessage, error) {
 	var l2Message []byte
@@ -1291,6 +1341,63 @@ func (s *Sequencer) precheckNonces(queueItems []txQueueItem) []txQueueItem {
 	return outputQueueItems
 }
 
+// new
+func (s *Sequencer) resolvePoliciesForQueueItems(
+	ctx context.Context,
+	lastBlockHeader *types.Header,
+	queueItems []txQueueItem,
+) (*CandidateBlock, error) {
+	if s.policyResolver == nil {
+		return nil, nil
+	}
+
+	msgIdx, err := s.execEngine.BlockNumberToMessageIndex(lastBlockHeader.Number.Uint64() + 1)
+	if err != nil {
+		return nil, err
+	}
+
+	blockCtx := &endorsementpolicy.BlockPolicyContext{
+		ChainID:             s.execEngine.bc.Config().ChainID,
+		ParentHash:          lastBlockHeader.Hash(),
+		BlockNumber:         lastBlockHeader.Number.Uint64() + 1,
+		MessageIndex:        uint64(msgIdx),
+		DelayedMessagesRead: lastBlockHeader.Nonce.Uint64(),
+	}
+
+	result := &CandidateBlock{
+		QueueItems: make([]txQueueItem, len(queueItems)),
+		Txs:        make([]*CandidateTx, 0, len(queueItems)),
+	}
+	copy(result.QueueItems, queueItems)
+
+	for i := range queueItems {
+		item := &queueItems[i]
+
+		resolution, err := s.policyResolver.ResolveTxPolicy(
+			ctx,
+			blockCtx,
+			item.tx,
+			i,
+			nil, // 第一版不使用 tx 自带 hint
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := resolution.Validate(); err != nil {
+			return nil, err
+		}
+
+		result.Txs = append(result.Txs, &CandidateTx{
+			TxIndex:   i,
+			Tx:        item.tx,
+			Receipt:   nil, // 执行前还没有 receipt
+			Policy:    resolution,
+		})
+	}
+
+	return result, nil
+}
+
 func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	var queueItems []txQueueItem
 
@@ -1439,6 +1546,31 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	queueItems = s.precheckNonces(queueItems)
 	timeboostedTxs := make(map[common.Hash]struct{})
 	maxTxDataSize := s.config().MaxTxDataSize
+
+	// new
+	if len(queueItems) == 0 {
+		return false
+	}
+
+	lastBlockHeader := s.execEngine.bc.CurrentBlock()
+	if lastBlockHeader == nil {
+		log.Error("sequencer failed to get current block header")
+		return true
+	}
+
+	// 新增：执行前策略解析
+	candidateBlock, candierr := s.resolvePoliciesForQueueItems(ctx, lastBlock, queueItems)
+
+	if candierr != nil {
+		log.Error("failed to resolve endorsement policies", "err", candierr)
+		for _, queueItem := range queueItems {
+			if !queueItem.returnedResult.Load() {
+				queueItem.returnResult(candierr)
+			}
+		}
+		return false
+	}
+
 	hooks := MakeSequencingHooks(
 		queueItems,
 		maxTxDataSize,
@@ -1446,6 +1578,21 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		s.postTxFilter,
 		nil,
 	)
+
+	// new
+	hooks.SetCandidateBlock(candidateBlock)
+
+	if candidateBlock != nil {
+		for _, item := range candidateBlock.Txs {
+			log.Debug(
+				"resolved tx endorsement policy",
+				"txHash", item.Tx.Hash(),
+				"txIndex", item.TxIndex,
+				"policyID", item.Policy.Policy.ID,
+				"threshold", item.Policy.Policy.Threshold,
+			)
+		}
+	}
 
 	for _, queueItem := range queueItems {
 		if queueItem.isTimeboosted {
@@ -1486,6 +1633,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		L1BaseFee:   nil,
 	}
 
+	// 执行交易
 	start := time.Now()
 	var (
 		block *types.Block
