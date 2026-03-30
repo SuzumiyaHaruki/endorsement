@@ -25,6 +25,7 @@ type InMemoryResultCollector struct {
 	states map[int]*txCollectState
 }
 
+// 初始化 InMemoryResultCollector
 func (c *InMemoryResultCollector) Init(block *CandidateBlockInput) error {
 	if block == nil {
 		return ErrNilCandidateBlockInput
@@ -134,10 +135,19 @@ func (c *InMemoryResultCollector) AllSatisfied() bool {
 func (c *InMemoryResultCollector) GetFailedTxs() *RebuildInstruction {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.buildRebuildInstructionLocked(true)
+}
 
+func (c *InMemoryResultCollector) GetDefinitelyFailedTxs() *RebuildInstruction {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buildRebuildInstructionLocked(false)
+}
+
+func (c *InMemoryResultCollector) buildRebuildInstructionLocked(includeUnsatisfied bool) *RebuildInstruction {
 	out := &RebuildInstruction{}
 	for txIndex, st := range c.states {
-		if st.failed || !st.satisfied {
+		if st.failed || (includeUnsatisfied && !st.satisfied) {
 			out.FailedTxIndexes = append(out.FailedTxIndexes, txIndex)
 			out.FailedTxHashes = append(out.FailedTxHashes, st.txHash)
 		}

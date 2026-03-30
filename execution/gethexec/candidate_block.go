@@ -2,11 +2,13 @@ package gethexec
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/offchainlabs/nitro/endorsementpolicy"
+	"github.com/offchainlabs/nitro/endorsement"
 )
 
 var (
@@ -191,4 +193,25 @@ func FindFailedTxIndexesByHash(
 		}
 	}
 	return indexes, nil
+}
+
+// 重建错误类型
+type ErrCandidateBlockRebuildRequired struct {
+	Decision *endorsement.BlockProcessingDecision
+}
+
+func (e *ErrCandidateBlockRebuildRequired) Error() string {
+	if e == nil || e.Decision == nil || e.Decision.Rebuild == nil {
+		return "candidate block rebuild required"
+	}
+	return fmt.Sprintf(
+		"candidate block rebuild required: failedTxIndexes=%v failedTxHashes=%v",
+		e.Decision.Rebuild.FailedTxIndexes,
+		e.Decision.Rebuild.FailedTxHashes,
+	)
+}
+
+func IsCandidateBlockRebuildRequired(err error) bool {
+	var rebuildErr *ErrCandidateBlockRebuildRequired
+	return errors.As(err, &rebuildErr)
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/offchainlabs/nitro/endorsementpolicy"
 )
 
+// CandidateTxInput 和 CandidateBlockInput 是 CandidateTx 和 CandidateBlock 在 endorsement 包的映射
 type CandidateTxInput struct {
 	TxIndex int
 	Tx      *types.Transaction
@@ -45,6 +46,8 @@ type DecisionPayload struct {
 	TxHash     common.Hash
 	TxIndex    int
 	Receipt    *types.Receipt
+	To 		   *common.Address
+	From       *common.Address
 }
 
 // TxExecutionDigest，背书节点签名的对象
@@ -73,6 +76,7 @@ type EndorsementResponse struct {
 	ReasonCode string
 }
 
+// 如果背书策略被满足，则将背书节点签名聚合成 TxEndorsementCertificate
 type TxEndorsementCertificate struct {
 	TxIndex            int
 	TxHash             common.Hash
@@ -96,6 +100,7 @@ type BlockProcessingDecision struct {
 }
 
 // EndorsementManager接口
+// 接收一个 CandidateBlock，返回背书结果
 type EndorsementManager interface {
 	ProcessCandidateBlock(
 		ctx context.Context,
@@ -126,6 +131,7 @@ type EndorsementClient interface {
 type ResultCollector interface {
 	// 初始化整个候选块的收集状态
 	Init(block *CandidateBlockInput) error
+
 	// 记录某笔交易来自某个背书节点的响应
 	RecordResponse(
 		txIndex int,
@@ -133,14 +139,24 @@ type ResultCollector interface {
 		resp *EndorsementResponse,
 		err error,
 	) error
+
 	// 判断某笔交易当前是否已经满足背书条件
 	IsTxSatisfied(txIndex int) bool
+
 	// 判断某笔交易当前是否已经明确失败
 	IsTxFailed(txIndex int) bool
+
 	// 判断整块是否已全部满足背书条件
 	AllSatisfied() bool
-	// 返回所有失败交易
+
+	// 返回所有需要在“超时场景”下剔除的交易：
+	// 包括 definitely failed + 当前仍 unsatisfied 的交易
 	GetFailedTxs() *RebuildInstruction
+
+	// 返回所有“明确失败”的交易：
+	// 仅用于快速失败/提前停止后的重建
+	GetDefinitelyFailedTxs() *RebuildInstruction
+
 	// 返回满足条件的交易背书材料，供后续生成 certificate
 	GetAcceptedResults(txIndex int) (map[endorsementpolicy.EndorserID]*EndorsementResponse, error)
 }
@@ -180,6 +196,7 @@ func (b *CandidateBlockInput) Validate() error {
 	return nil
 }
 
+// 计算 RequestID
 func CalcRequestID(blockHash common.Hash, txHash common.Hash, txIndex int) common.Hash {
 	h := sha256.New()
 	h.Write(blockHash[:])
@@ -190,6 +207,7 @@ func CalcRequestID(blockHash common.Hash, txHash common.Hash, txIndex int) commo
 	return common.BytesToHash(h.Sum(nil))
 }
 
+// 计算 TxExecutionDigest（被背书节点签名的内容）
 func CalcTxExecutionDigest(payload DecisionPayload) TxExecutionDigest {
 	h := sha256.New()
 	h.Write(payload.ParentHash[:])

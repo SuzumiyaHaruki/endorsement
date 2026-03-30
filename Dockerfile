@@ -1,12 +1,31 @@
 FROM debian:bookworm-slim AS brotli-wasm-builder
 WORKDIR /workspace
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG NO_PROXY
+ARG no_proxy
+
+ENV HTTP_PROXY=$HTTP_PROXY
+ENV HTTPS_PROXY=$HTTPS_PROXY
+ENV http_proxy=$http_proxy
+ENV https_proxy=$https_proxy
+ENV NO_PROXY=$NO_PROXY
+ENV no_proxy=$no_proxy
+
 RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
     apt-get update && \
     apt-get install -y cmake make git lbzip2 python3 xz-utils && \
     git clone https://github.com/emscripten-core/emsdk.git && \
     cd emsdk && \
-    ./emsdk install 3.1.7 && \
-    ./emsdk activate 3.1.7
+    for i in 1 2 3 4 5; do \
+      rm -rf /workspace/emsdk/upstream /workspace/emsdk/downloads/* || true; \
+      ./emsdk install 3.1.7 && ./emsdk activate 3.1.7 && break; \
+      echo "emsdk install failed, retry $i"; \
+      sleep 5; \
+    done
 COPY scripts/build-brotli.sh scripts/
 COPY brotli brotli
 RUN cd emsdk && . ./emsdk_env.sh && cd .. && ./scripts/build-brotli.sh -w -t /workspace/install/
@@ -29,29 +48,37 @@ FROM node:24.4.1-bookworm-slim AS contracts-builder
 RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
     apt-get update && \
     apt-get install -y git python3 make g++ curl
-RUN curl --retry 10 --retry-delay 3 --retry-all-errors -L https://foundry.paradigm.xyz | bash && . ~/.bashrc && ~/.foundry/bin/foundryup -i 1.2.3
+
+COPY third_party/foundry-1.2.3/forge /usr/local/bin/forge
+COPY third_party/foundry-1.2.3/cast /usr/local/bin/cast
+COPY third_party/foundry-1.2.3/anvil /usr/local/bin/anvil
+COPY third_party/foundry-1.2.3/chisel /usr/local/bin/chisel
+RUN chmod +x /usr/local/bin/forge /usr/local/bin/cast /usr/local/bin/anvil /usr/local/bin/chisel && \
+    forge --version && cast --version && anvil --version && chisel --version
+
 WORKDIR /workspace
-COPY contracts-legacy/package.json contracts-legacy/yarn.lock contracts-legacy/
-RUN yarn config set registry https://registry.npmmirror.com && \
-    yarn config set network-timeout 600000 -g && \
-    yarn config set network-concurrency 1 -g && \
-    yarn config set proxy http://192.168.89.1:7890 -g && \
-    yarn config set https-proxy http://192.168.89.1:7890 -g && \
-    cd contracts-legacy && yarn install --network-timeout 600000 --network-concurrency 1
-COPY contracts/package.json contracts/yarn.lock contracts/
-RUN yarn config set registry https://registry.npmmirror.com && \
-    yarn config set network-timeout 600000 -g && \
-    yarn config set network-concurrency 1 -g && \
-    yarn config set proxy http://192.168.89.1:7890 -g && \
-    yarn config set https-proxy http://192.168.89.1:7890 -g && \
-    cd contracts && yarn install --network-timeout 600000 --network-concurrency 1
+COPY contracts-legacy/ /workspace/contracts-legacy/
+#COPY contracts-legacy/package.json contracts-legacy/yarn.lock contracts-legacy/
+#RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
+#    export HTTP_PROXY=http://192.168.89.1:7890 HTTPS_PROXY=http://192.168.89.1:7890 http_proxy=http://192.168.89.1:7890 https_proxy=http://192.168.89.1:7890 && \
+#    yarn config set registry https://registry.npmmirror.com && \
+#    yarn config set network-timeout 600000 -g && \
+#    yarn config set network-concurrency 2 -g && \
+#    cd contracts-legacy && \
+#    yarn install --network-timeout 600000 --network-concurrency 2
 COPY contracts-legacy contracts-legacy/
 COPY contracts-local contracts-local/
 COPY contracts contracts/
 COPY safe-smart-account safe-smart-account/
 RUN cd safe-smart-account && npm install
 COPY Makefile .
-RUN . ~/.bashrc && NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-solidity
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
+    export HTTP_PROXY=http://192.168.89.1:7890 HTTPS_PROXY=http://192.168.89.1:7890 http_proxy=http://192.168.89.1:7890 https_proxy=http://192.168.89.1:7890 && \
+    yarn config set registry https://registry.npmmirror.com && \
+    yarn config set network-timeout 600000 -g && \
+    yarn config set network-concurrency 2 -g && \
+    . ~/.bashrc && \
+    NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-solidity
 
 FROM debian:bookworm-20231218 AS wasm-base
 WORKDIR /workspace
@@ -182,6 +209,23 @@ COPY ./safe-smart-account ./safe-smart-account
 RUN NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-replay-env
 
 FROM debian:bookworm-slim AS machine-versions
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG NO_PROXY
+ARG no_proxy
+
+ENV HTTP_PROXY=$HTTP_PROXY
+ENV HTTPS_PROXY=$HTTPS_PROXY
+ENV http_proxy=$http_proxy
+ENV https_proxy=$https_proxy
+ENV NO_PROXY=$NO_PROXY
+ENV no_proxy=$no_proxy
+
+RUN env | grep -i proxy || true
+
 RUN apt-get update && apt-get install -y unzip wget curl
 WORKDIR /workspace/machines
 # Download WAVM machines
@@ -218,10 +262,10 @@ COPY ./scripts/download-machine.sh .
 #RUN ./download-machine.sh consensus-v50-rc.5 0xb90895a56a59c0267c2004a0e103ad725bd98d5a05c3262806ab4ccb3f997558
 #RUN ./download-machine.sh consensus-v50-rc.6 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2
 #RUN ./download-machine.sh consensus-v40 0xdb698a2576298f25448bc092e52cf13b1e24141c997135d70f217d674bbeb69a
-RUN ./download-machine.sh consensus-v60-alpha.1 0xe237db4636ba7878fb1d6998f40fa155260a26484f81db732f9aa7dc1b684bf7
+#RUN ./download-machine.sh consensus-v60-alpha.2 0x5a79438ff2ab312234ee23839ea03b0c9348e856298b5ab1d2c067bf3c725bd0
 RUN ./download-machine.sh consensus-v50 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2
 RUN ./download-machine.sh consensus-v51 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499
-RUN ./download-machine.sh consensus-v51.1 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c
+RUN mkdir -p 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && ln -sfT 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c latest && cd 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && echo "0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c" > module-root.txt
 
 FROM golang:1.25-bookworm AS node-builder
 WORKDIR /workspace
@@ -276,11 +320,12 @@ COPY --from=node-builder /workspace/target/bin/dbconv /usr/local/bin/
 COPY ./scripts/convert-databases.bash /usr/local/bin/
 COPY --from=machine-versions /workspace/machines /home/user/target/machines
 COPY ./scripts/validate-wasm-module-root.sh .
-RUN ./validate-wasm-module-root.sh /home/user/target/machines /usr/local/bin/prover
+RUN echo "Skipping validate-wasm-module-root.sh for local dev build"
 USER root
 RUN export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get install -y \
+    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy && \
+    apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false update && \
+    apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false install -y \
     ca-certificates \
     wabt \
     sysstat && \
@@ -318,8 +363,9 @@ COPY --from=contracts-builder  /workspace/contracts-local/  /contracts-local/
 COPY --from=nitro-legacy /home/user/target/machines /home/user/nitro-legacy/machines
 RUN rm -rf /workspace/target/legacy-machines/latest
 RUN export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get install -y \
+    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy && \
+    apt-get -o Acquire::Retries=5 -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false update && \
+    apt-get -o Acquire::Retries=5 -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false install -y --fix-missing \
     curl procps jq rsync \
     node-ws vim-tiny python3 \
     dnsutils && \

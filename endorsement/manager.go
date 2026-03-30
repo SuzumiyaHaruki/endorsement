@@ -39,23 +39,23 @@ func (m *DefaultEndorsementManager) ProcessCandidateBlock(
 	if err := m.Collector.Init(block); err != nil {
 		return nil, err
 	}
-	// 创建全局超时上下文
+
+	// 设置全局的超时时间
 	endorseCtx, cancel := context.WithTimeout(ctx, cfg.BlockEndorsementTimeout)
 	defer cancel()
 
-	// 定义并发控制变量
 	var wg sync.WaitGroup
 	stopCh := make(chan struct{})
 	var stopOnce sync.Once
 	stop := func() { stopOnce.Do(func() { close(stopCh) }) }
 
-	// 遍历块内每笔交易
+	// 对于区块中的每一笔交易
 	for _, tx := range block.Txs {
 		req, err := m.RequestBuilder.BuildRequest(block, tx)
 		if err != nil {
 			return nil, err
 		}
-		// 遍历这笔交易的所有背书节点
+		// 对于交易对应的每一个背书节点
 		for _, member := range tx.Policy.Policy.Endorsers.Members {
 			endorserID := member.ID
 			wg.Add(1)
@@ -79,29 +79,51 @@ func (m *DefaultEndorsementManager) ProcessCandidateBlock(
 		}
 	}
 
-	// 等待所有 goroutine 完成或超时
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
+	type completionMode int
+	const (
+		completedAll completionMode = iota
+		completedTimeout
+		completedEarlyFailure
+	)
+
+	mode := completedAll
+
 	select {
 	case <-done:
-		// 所有背书都已完成
+		mode = completedAll
 	case <-endorseCtx.Done():
-		// 全局超时后，collector 中未满足的交易由 GetFailedTxs 统一视作失败
+		// 全局超时：未满足阈值的交易也要视为失败
+		mode = completedTimeout
 		<-done
 	case <-stopCh:
-		// 某个交易已经明确失败，触发了快速停止
+		// 某个交易已经明确失败：快速停止
+		mode = completedEarlyFailure
 		cancel()
 		<-done
 	}
 
 	if !m.Collector.AllSatisfied() {
+		var rebuild *RebuildInstruction
+		switch mode {
+		case completedTimeout:
+			// 超时：failed + unsatisfied 全部剔除
+			rebuild = m.Collector.GetFailedTxs()
+		case completedEarlyFailure, completedAll:
+			// 明确失败或全部结束但未全满足：只剔除 definitely failed
+			rebuild = m.Collector.GetDefinitelyFailedTxs()
+		default:
+			rebuild = m.Collector.GetDefinitelyFailedTxs()
+		}
+
 		return &BlockProcessingDecision{
 			AllSatisfied: false,
-			Rebuild:      m.Collector.GetFailedTxs(),
+			Rebuild:      rebuild,
 		}, nil
 	}
 

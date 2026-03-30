@@ -1373,8 +1373,18 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		return nil
 	}
 
+	log.Info("LOCAL_FAIL_PATH_CONFIG_V1")
+	log.Info(
+		"ENDORSEMENT_DEBUG entered processCandidateBlockEndorsement",
+		"hasBlock", block != nil,
+		"hasHooks", hooks != nil,
+	)
+
 	candidateBlock := hooks.CandidateBlock()
 	if candidateBlock == nil {
+		log.Info(
+			"ENDORSEMENT_DEBUG no candidate block attached to hooks",
+		)
 		return nil
 	}
 
@@ -1387,10 +1397,27 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		return err
 	}
 
+	log.Info(
+		"ENDORSEMENT_DEBUG candidate block attached",
+		"hasCandidateBlock", candidateBlock != nil,
+		"txCount", len(candidateBlock.Txs),
+		"l2Block", block.NumberU64(),
+		"blockHash", block.Hash(),
+	)
+
+	log.Info(
+		"ENDORSEMENT_DEBUG endorser wiring",
+		"hasEndorser", s.candidateBlockEndorser != nil,
+		"hasPolicyConfig", s.policyConfig != nil,
+	)
+
+	// 如果当前还没有真正注入 manager/config，就只打印候选交易信息
 	if s.candidateBlockEndorser == nil || s.policyConfig == nil {
-		// mock阶段只打日志
 		for _, tx := range candidateBlock.Txs {
-			log.Debug(
+			if tx == nil || tx.Tx == nil || tx.Policy == nil || tx.Policy.Policy == nil {
+				continue
+			}
+			log.Info(
 				"mock endorsement stage sees candidate tx",
 				"l2Block", block.NumberU64(),
 				"txIndex", tx.TxIndex,
@@ -1410,7 +1437,11 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		BlockNum:   candidateBlock.BlockNum,
 		Txs:        make([]*endorsement.CandidateTxInput, 0, len(candidateBlock.Txs)),
 	}
+
 	for _, tx := range candidateBlock.Txs {
+		if tx == nil {
+			return ErrNilCandidateTx
+		}
 		input.Txs = append(input.Txs, &endorsement.CandidateTxInput{
 			TxIndex: tx.TxIndex,
 			Tx:      tx.Tx,
@@ -1419,20 +1450,61 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		})
 	}
 
+	log.Info(
+		"ENDORSEMENT_DEBUG calling endorsement manager",
+		"l2Block", block.NumberU64(),
+		"txCount", len(input.Txs),
+		"timeout", s.policyConfig.BlockEndorsementTimeout,
+	)
+
 	decision, err := s.candidateBlockEndorser.ProcessCandidateBlock(ctx, s.policyConfig, input)
 	if err != nil {
+		log.Error(
+			"ENDORSEMENT_DEBUG endorsement manager returned error",
+			"l2Block", block.NumberU64(),
+			"err", err,
+		)
 		return err
 	}
+	if decision == nil {
+		return errors.New("endorsement manager returned nil decision")
+	}
+
+	log.Info(
+		"ENDORSEMENT_DEBUG endorsement manager returned",
+		"l2Block", block.NumberU64(),
+		"allSatisfied", decision.AllSatisfied,
+		"certCount", len(decision.Certificates),
+	)
 
 	if !decision.AllSatisfied {
-		log.Warn(
-			"candidate block endorsement failed",
-			"l2Block", block.NumberU64(),
-			"failedTxIndexes", decision.Rebuild.FailedTxIndexes,
-			"failedTxHashes", decision.Rebuild.FailedTxHashes,
-		)
+		if decision.Rebuild != nil {
+			log.Warn(
+				"candidate block endorsement failed",
+				"l2Block", block.NumberU64(),
+				"failedTxIndexes", decision.Rebuild.FailedTxIndexes,
+				"failedTxHashes", decision.Rebuild.FailedTxHashes,
+			)
+		} else {
+			log.Warn(
+				"candidate block endorsement failed",
+				"l2Block", block.NumberU64(),
+				"failedTxIndexes", nil,
+				"failedTxHashes", nil,
+			)
+		}
 		// Sequencer 外层处理重建
+		return &ErrCandidateBlockRebuildRequired{
+			Decision: decision,
+		}
 	}
+
+	log.Info(
+		"candidate block endorsement satisfied",
+		"l2Block", block.NumberU64(),
+		"certCount", len(decision.Certificates),
+		"commitmentRoot", decision.CommitmentRoot,
+	)
 
 	return nil
 }

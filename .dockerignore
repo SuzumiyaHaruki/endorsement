@@ -12,6 +12,8 @@ contracts/cache/
 safe-smart-account/build/
 solgen/go
 **/node_modules
+!contracts-legacy/node_modules
+!contracts-legacy/node_modules/**
 
 target/**/*
 !target/machines

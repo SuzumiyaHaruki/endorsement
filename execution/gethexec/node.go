@@ -282,19 +282,45 @@ func CreateExecutionNode(
 
 	execEngine := NewExecutionEngine(l2BlockChain, syncTillBlock, config.ExposeMultiGas)
 	// new
+	defaultPolicy, strictPolicy := buildDefaultEndorsementPolicies()
+
+	rules := endorsementpolicy.BuildDefaultExperimentRules(strictPolicy, defaultPolicy)
+	ruleResolver, err := endorsementpolicy.NewRuleBasedResolver(defaultPolicy, rules)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build rule-based endorsement resolver: %w", err)
+	}
+
+	policyConfig := &endorsementpolicy.PolicyConfig{
+		BlockEndorsementTimeout: 2 * time.Second,
+		MaxRebuildRounds:        3,
+	}
+
 	mgr := &endorsement.DefaultEndorsementManager{
-		RequestBuilder:     &endorsement.DefaultRequestBuilder{},
-		Client:             &endorsement.MockEndorsementClient{},
+		RequestBuilder: &endorsement.DefaultRequestBuilder{},
+		Client: &endorsement.MockEndorsementClient{
+			// 实验规则：
+			// 发送到 0x1111...1111 的交易，对 A/B/C 全部拒绝 -> 必失败
+			RejectByToAndEndorser: map[common.Address]map[endorsementpolicy.EndorserID]bool{
+				common.HexToAddress("0x1111111111111111111111111111111111111111"): {
+					"A": true,
+					"B": true,
+					"C": true,
+				},
+			},
+
+			RejectByEndorser: nil,
+			RejectByTxIndex:  nil,
+			RejectByTxHash:   nil,
+		},
 		Collector:          &endorsement.InMemoryResultCollector{},
 		CertificateBuilder: &endorsement.DefaultCertificateBuilder{},
 		RootBuilder:        &endorsement.DefaultRootBuilder{},
 	}
+	// ========= endorsement policy / resolver 配置结束 =========
 
 	execEngine.SetCandidateBlockEndorser(mgr)
-	execEngine.SetPolicyConfig(&endorsementpolicy.PolicyConfig{
-		BlockEndorsementTimeout: 2 * time.Second,
-		MaxRebuildRounds:        3,
-	})
+	execEngine.SetPolicyConfig(policyConfig)
+
 	if config.EnablePrefetchBlock {
 		execEngine.EnablePrefetchBlock()
 	}
@@ -306,7 +332,6 @@ func CreateExecutionNode(
 	var txPublisher TransactionPublisher
 	var sequencer *Sequencer
 
-	var err error
 	var parentChainReader *headerreader.HeaderReader
 	if l1client != nil && !reflect.ValueOf(l1client).IsNil() {
 		arbSys, _ := precompilesgen.NewArbSys(types.ArbSysAddress, l1client)
@@ -325,29 +350,11 @@ func CreateExecutionNode(
 			return nil, err
 		}
 
-		// new
-		// 第一版：注入一个静态背书策略解析器
-		sequencer.SetPolicyResolver(&endorsementpolicy.StaticResolver{
-			DefaultPolicy: &endorsementpolicy.EndorsementPolicy{
-				ID: "default",
-				Endorsers: endorsementpolicy.EndorserSet{
-					Members: []endorsementpolicy.EndorserMember{
-						{ID: "A"},
-						{ID: "B"},
-						{ID: "C"},
-					},
-				},
-				Threshold:       2,
-				FailMode:        endorsementpolicy.EndorsementFailDropTxAndRebuild,
-				AggregationType: endorsementpolicy.AggregationIndividualSignatures,
-			},
-		})
+		// 用 RuleBasedResolver 替换 StaticResolver
+		sequencer.SetPolicyResolver(ruleResolver)
 
-		// 第一版：注入全局背书配置（区块级超时）
-		sequencer.SetPolicyConfig(&endorsementpolicy.PolicyConfig{
-			BlockEndorsementTimeout: 2 * time.Second,
-			MaxRebuildRounds:        3,
-		})
+		// 用统一 policyConfig，避免 sequencer / execution engine 配置分叉
+		sequencer.SetPolicyConfig(policyConfig)
 
 		txPublisher = sequencer
 	} else {
@@ -756,4 +763,41 @@ func (n *ExecutionNode) InitializeTimeboost(ctx context.Context, chainConfig *pa
 	}
 
 	return nil
+}
+
+// new
+
+func buildDefaultEndorsementPolicies() (
+	defaultPolicy *endorsementpolicy.EndorsementPolicy,
+	strictPolicy *endorsementpolicy.EndorsementPolicy,
+) {
+	defaultPolicy = &endorsementpolicy.EndorsementPolicy{
+		ID: "default",
+		Endorsers: endorsementpolicy.EndorserSet{
+			Members: []endorsementpolicy.EndorserMember{
+				{ID: "A"},
+				{ID: "B"},
+				{ID: "C"},
+			},
+		},
+		Threshold:       2,
+		FailMode:        endorsementpolicy.EndorsementFailDropTxAndRebuild,
+		AggregationType: endorsementpolicy.AggregationIndividualSignatures,
+	}
+
+	strictPolicy = &endorsementpolicy.EndorsementPolicy{
+		ID: "strict",
+		Endorsers: endorsementpolicy.EndorserSet{
+			Members: []endorsementpolicy.EndorserMember{
+				{ID: "A"},
+				{ID: "B"},
+				{ID: "C"},
+			},
+		},
+		Threshold:       3,
+		FailMode:        endorsementpolicy.EndorsementFailDropTxAndRebuild,
+		AggregationType: endorsementpolicy.AggregationIndividualSignatures,
+	}
+
+	return defaultPolicy, strictPolicy
 }
