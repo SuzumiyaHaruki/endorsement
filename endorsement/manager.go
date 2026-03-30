@@ -49,12 +49,14 @@ func (m *DefaultEndorsementManager) ProcessCandidateBlock(
 	var stopOnce sync.Once
 	stop := func() { stopOnce.Do(func() { close(stopCh) }) }
 
+	reqByTxIndex := make(map[int]*EndorsementRequest, len(block.Txs))
 	// 对于区块中的每一笔交易
 	for _, tx := range block.Txs {
 		req, err := m.RequestBuilder.BuildRequest(block, tx)
 		if err != nil {
 			return nil, err
 		}
+		reqByTxIndex[tx.TxIndex] = req
 		// 对于交易对应的每一个背书节点
 		for _, member := range tx.Policy.Policy.Endorsers.Members {
 			endorserID := member.ID
@@ -133,7 +135,11 @@ func (m *DefaultEndorsementManager) ProcessCandidateBlock(
 		if err != nil {
 			return nil, err
 		}
-		cert, err := m.CertificateBuilder.BuildCertificate(tx, accepted)
+		req := reqByTxIndex[tx.TxIndex]
+		if req == nil {
+			return nil, errors.New("missing endorsement request for tx")
+		}
+		cert, err := m.CertificateBuilder.BuildCertificate(req, tx, accepted)
 		if err != nil {
 			return nil, err
 		}

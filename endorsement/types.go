@@ -164,6 +164,7 @@ type ResultCollector interface {
 // 背书证书生成器
 type CertificateBuilder interface {
 	BuildCertificate(
+		req *EndorsementRequest,
 		tx *CandidateTxInput,
 		accepted map[endorsementpolicy.EndorserID]*EndorsementResponse,
 	) (*TxEndorsementCertificate, error)

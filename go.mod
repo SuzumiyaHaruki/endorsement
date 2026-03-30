@@ -79,6 +79,7 @@ require (
 	github.com/google/s2a-go v0.1.7 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.2 // indirect
 	github.com/googleapis/gax-go/v2 v2.12.5 // indirect
+	github.com/herumi/bls-eth-go-binary v1.37.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
 	github.com/pion/dtls/v2 v2.2.7 // indirect

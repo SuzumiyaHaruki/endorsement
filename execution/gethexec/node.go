@@ -295,28 +295,60 @@ func CreateExecutionNode(
 		MaxRebuildRounds:        3,
 	}
 
+	// ========= endorsement policy / resolver / BLS 配置开始 =========
+
+	// 与原 mock client 保持一致的 reject 规则：
+	// 发送到 0x1111...1111 的交易，对 A/B/C 全部拒绝 -> 必失败
+	rejectRules := endorsement.EndorsementRejectRules{
+		RejectByToAndEndorser: map[common.Address]map[endorsementpolicy.EndorserID]bool{
+			common.HexToAddress("0x1111111111111111111111111111111111111111"): {
+				"A": true,
+				"B": true,
+				"C": true,
+			},
+		},
+		RejectByFromAndEndorser: nil,
+		RejectByEndorser:        nil,
+		RejectByTxIndex:         nil,
+		RejectByTxHash:          nil,
+	}
+
+	// 初始化 BLS 私钥仓库与公钥注册表
+	blsKeyStore := endorsement.NewBLSSecretKeyStore()
+	blsPubRegistry := endorsement.NewInMemoryBLSPublicKeyRegistry()
+
+	// 为当前实验里会用到的 endorser 生成 BLS key，并注册公钥
+	// 这里先按当前默认实验策略固定使用 A/B/C
+	endorsers := []endorsementpolicy.EndorserID{"A", "B", "C"}
+	for _, id := range endorsers {
+		if err := blsKeyStore.AddRandomKey(id); err != nil {
+			return nil, fmt.Errorf("failed to create BLS secret key for endorser %s: %w", id, err)
+		}
+
+		pubBytes, err := blsKeyStore.GetPublicKeyBytes(id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get BLS public key for endorser %s: %w", id, err)
+		}
+
+		if err := blsPubRegistry.RegisterPublicKey(id, pubBytes); err != nil {
+			return nil, fmt.Errorf("failed to register BLS public key for endorser %s: %w", id, err)
+		}
+	}
+
 	mgr := &endorsement.DefaultEndorsementManager{
 		RequestBuilder: &endorsement.DefaultRequestBuilder{},
-		Client: &endorsement.MockEndorsementClient{
-			// 实验规则：
-			// 发送到 0x1111...1111 的交易，对 A/B/C 全部拒绝 -> 必失败
-			RejectByToAndEndorser: map[common.Address]map[endorsementpolicy.EndorserID]bool{
-				common.HexToAddress("0x1111111111111111111111111111111111111111"): {
-					"A": true,
-					"B": true,
-					"C": true,
-				},
-			},
-
-			RejectByEndorser: nil,
-			RejectByTxIndex:  nil,
-			RejectByTxHash:   nil,
+		Client: &endorsement.BLSEndorsementClient{
+			KeyStore: blsKeyStore,
+			Rules:    rejectRules,
 		},
-		Collector:          &endorsement.InMemoryResultCollector{},
-		CertificateBuilder: &endorsement.DefaultCertificateBuilder{},
-		RootBuilder:        &endorsement.DefaultRootBuilder{},
+		Collector: &endorsement.InMemoryResultCollector{},
+		CertificateBuilder: &endorsement.DefaultCertificateBuilder{
+			BLSPublicKeys: blsPubRegistry,
+		},
+		RootBuilder: &endorsement.DefaultRootBuilder{},
 	}
-	// ========= endorsement policy / resolver 配置结束 =========
+	// ========= endorsement policy / resolver / BLS 配置结束 =========
+
 
 	execEngine.SetCandidateBlockEndorser(mgr)
 	execEngine.SetPolicyConfig(policyConfig)

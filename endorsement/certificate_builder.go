@@ -5,13 +5,35 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"sync"
+	"fmt"
 
+	"github.com/herumi/bls-eth-go-binary/bls"
 	"github.com/offchainlabs/nitro/endorsementpolicy"
 )
 
-type DefaultCertificateBuilder struct{}
+type DefaultCertificateBuilder struct{
+	BLSPublicKeys BLSPublicKeyRegistry
+}
+
+var (
+	blsInitOnce sync.Once
+	blsInitErr  error
+)
+
+func ensureBLSInitialized() error {
+	blsInitOnce.Do(func() {
+		blsInitErr = bls.Init(bls.BLS12_381)
+		// 为了尽量保证编译兼容性，这里不强绑 SetETHmode 常量；
+		// 如果明确锁定了某个 herumi 版本，也可以在这里额外调用：
+		// _ = bls.SetETHmode(bls.EthModeDraft07)
+	})
+	return blsInitErr
+}
+
 
 func (b *DefaultCertificateBuilder) BuildCertificate(
+	req *EndorsementRequest,
 	tx *CandidateTxInput,
 	accepted map[endorsementpolicy.EndorserID]*EndorsementResponse,
 ) (*TxEndorsementCertificate, error) {
@@ -29,6 +51,7 @@ func (b *DefaultCertificateBuilder) BuildCertificate(
 	SortEndorserIDs(signerIDs)
 
 	agg, err := b.buildAggregateSignature(
+		req,
 		tx.Policy.Policy.AggregationType,
 		signerIDs,
 		accepted,
@@ -48,6 +71,7 @@ func (b *DefaultCertificateBuilder) BuildCertificate(
 }
 
 func (b *DefaultCertificateBuilder) buildAggregateSignature(
+	req *EndorsementRequest,
 	aggType endorsementpolicy.AggregationType,
 	signerIDs []endorsementpolicy.EndorserID,
 	accepted map[endorsementpolicy.EndorserID]*EndorsementResponse,
@@ -60,8 +84,7 @@ func (b *DefaultCertificateBuilder) buildAggregateSignature(
 		return buildBitmapSignaturesAggregate(signerIDs, accepted)
 
 	case endorsementpolicy.AggregationBLS:
-		// 第一版暂不实现真正 BLS 聚合
-		return nil, errors.New("BLS aggregation is not implemented")
+		return b.buildBLSAggregateAndVerify(req, signerIDs, accepted)
 
 	case endorsementpolicy.AggregationCommitmentOnly:
 		return buildCommitmentOnlyAggregate(signerIDs, accepted)
@@ -122,6 +145,79 @@ func buildBitmapSignaturesAggregate(
 		SignerIDs:  signerIDs,
 		Bitmap:     bitmap,
 		Signatures: sigs,
+	}
+	return json.Marshal(payload)
+}
+
+type blsAggregatePayload struct {
+	Scheme              string                         `json:"scheme"`
+	SignerIDs           []endorsementpolicy.EndorserID `json:"signer_ids"`
+	AggregatedSignature []byte                         `json:"aggregated_signature"`
+}
+
+func (b *DefaultCertificateBuilder) buildBLSAggregateAndVerify(
+	req *EndorsementRequest,
+	signerIDs []endorsementpolicy.EndorserID,
+	accepted map[endorsementpolicy.EndorserID]*EndorsementResponse,
+) ([]byte, error) {
+	if req == nil {
+		return nil, errors.New("nil endorsement request for BLS certificate")
+	}
+	if b.BLSPublicKeys == nil {
+		return nil, errors.New("nil BLS public key registry")
+	}
+	if len(signerIDs) == 0 {
+		return nil, errors.New("empty signer set for BLS aggregate")
+	}
+	if err := ensureBLSInitialized(); err != nil {
+		return nil, fmt.Errorf("init BLS library: %w", err)
+	}
+
+	msg := req.SigningDigest[:]
+
+	sigs := make([]bls.Sign, 0, len(signerIDs))
+	pubs := make([]bls.PublicKey, 0, len(signerIDs))
+
+	for _, id := range signerIDs {
+		resp := accepted[id]
+		if resp == nil {
+			return nil, fmt.Errorf("missing accepted response for signer %s", id)
+		}
+		if len(resp.Signature) == 0 {
+			return nil, fmt.Errorf("empty BLS signature for signer %s", id)
+		}
+
+		var sig bls.Sign
+		if err := sig.Deserialize(resp.Signature); err != nil {
+			return nil, fmt.Errorf("deserialize BLS signature for signer %s: %w", id, err)
+		}
+		sigs = append(sigs, sig)
+
+		pubBytes, err := b.BLSPublicKeys.GetPublicKey(id)
+		if err != nil {
+			return nil, err
+		}
+
+		var pub bls.PublicKey
+		if err := pub.Deserialize(pubBytes); err != nil {
+			return nil, fmt.Errorf("deserialize BLS public key for signer %s: %w", id, err)
+		}
+		pubs = append(pubs, pub)
+	}
+
+	var aggSig bls.Sign
+	aggSig.Aggregate(sigs)
+
+	// 关键：在 builder 内部做 FastAggregateVerify
+	// 所有 signer 对同一条 32-byte digest 签名，正符合 FastAggregateVerify 语义。
+	if !aggSig.FastAggregateVerify(pubs, msg) {
+		return nil, errors.New("BLS FastAggregateVerify failed")
+	}
+
+	payload := blsAggregatePayload{
+		Scheme:              "bls12-381-herumi-fast-aggregate-verify",
+		SignerIDs:           signerIDs,
+		AggregatedSignature: aggSig.Serialize(),
 	}
 	return json.Marshal(payload)
 }

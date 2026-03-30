@@ -119,9 +119,13 @@ func makeCandidateBlockInputWith2Txs(t *testing.T, threshold uint32) *CandidateB
 
 func makeDefaultTestManager(reject map[endorsementpolicy.EndorserID]bool) *DefaultEndorsementManager {
 	return &DefaultEndorsementManager{
-		RequestBuilder:     &DefaultRequestBuilder{},
-		Client:             &MockEndorsementClient{RejectByEndorser: reject},
-		Collector:          &InMemoryResultCollector{},
+		RequestBuilder: &DefaultRequestBuilder{},
+		Client: &MockEndorsementClient{
+			Rules: EndorsementRejectRules{
+				RejectByEndorser: reject,
+			},
+		},
+		Collector: &InMemoryResultCollector{},
 		CertificateBuilder: &DefaultCertificateBuilder{},
 		RootBuilder:        &DefaultRootBuilder{},
 	}
