@@ -317,12 +317,20 @@ func CreateExecutionNode(
 	blsKeyStore := endorsement.NewBLSSecretKeyStore()
 	blsPubRegistry := endorsement.NewInMemoryBLSPublicKeyRegistry()
 
-	// 为当前实验里会用到的 endorser 生成 BLS key，并注册公钥
-	// 这里先按当前默认实验策略固定使用 A/B/C
-	endorsers := []endorsementpolicy.EndorserID{"A", "B", "C"}
-	for _, id := range endorsers {
-		if err := blsKeyStore.AddRandomKey(id); err != nil {
-			return nil, fmt.Errorf("failed to create BLS secret key for endorser %s: %w", id, err)
+	// 固定 BLS 私钥配置。
+	// 注意：
+	// 1. 这里必须使用稳定不变的 key，不能每次启动随机生成。
+	// 2. 这些值应当替换成实际生成并固定保存的 BLS secret key hex。
+	// 3. 每个 EndorserID 必须长期绑定同一把 key，否则历史块无法持续验证。
+	blsSecretKeyHex := map[endorsementpolicy.EndorserID]string{
+		"A": "4a828dadf8374bd9dfc8e74b0f5c0e3e90e9760cf495b491502d2f784f634917",
+		"B": "3e0113bf243ee2409d37540d6007ad634cc4dfbab960d8808f373708bbcd25fe",
+		"C": "4b469620cf2e1ff647a7092d7a658c6dd5be85fa627ae2dea448f5c9c8ee27e1",
+	}
+
+	for id, skHex := range blsSecretKeyHex {
+		if err := blsKeyStore.AddSecretKeyHex(id, skHex); err != nil {
+			return nil, fmt.Errorf("failed to load fixed BLS secret key for endorser %s: %w", id, err)
 		}
 
 		pubBytes, err := blsKeyStore.GetPublicKeyBytes(id)
@@ -352,6 +360,7 @@ func CreateExecutionNode(
 
 	execEngine.SetCandidateBlockEndorser(mgr)
 	execEngine.SetPolicyConfig(policyConfig)
+	execEngine.SetCommitmentVerifierBLSPublicKeys(blsPubRegistry)
 
 	if config.EnablePrefetchBlock {
 		execEngine.EnablePrefetchBlock()

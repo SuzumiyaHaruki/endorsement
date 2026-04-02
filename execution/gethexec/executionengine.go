@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"encoding/binary"
 
 	"github.com/google/uuid"
 
@@ -58,6 +59,8 @@ import (
 	// new
 	"github.com/offchainlabs/nitro/endorsementpolicy"
 	"github.com/offchainlabs/nitro/endorsement"
+	"encoding/json"
+	"github.com/herumi/bls-eth-go-binary/bls"
 )
 
 var (
@@ -226,6 +229,8 @@ type ExecutionEngine struct {
 	// new
 	candidateBlockEndorser  endorsement.EndorsementManager
 	policyConfig           *endorsementpolicy.PolicyConfig
+	// 用于从 metadata 反解析 commitment data 后做 BLS 验签
+	commitmentVerifierBLSPublicKeys endorsement.BLSPublicKeyRegistry
 }
 
 func NewL1PriceData() *L1PriceData {
@@ -826,11 +831,77 @@ func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.
 		return nil, err
 	}
 
-	// 当前先沿用原有 blockMetadata 逻辑。
-	// 后续如果要把 endorsement 的 certRoot / certData 写进去，
-	// 可以把 decision 传给一个新的 blockMetadata builder。
-	_ = decision
-	blockMetadata := s.blockMetadataFromBlock(block, timeboostedTxs)
+	// _ = decision
+	// blockMetadata := s.blockMetadataFromBlock(block, timeboostedTxs)
+	blockMetadata := s.blockMetadataFromDecision(block, timeboostedTxs, decision)
+
+	parsedMeta, parseErr := ParseBlockMetadata(blockMetadata)
+	if parseErr != nil {
+		log.Warn("ENDORSEMENT_METADATA_BUILD_PARSE_FAILED",
+			"block", block.NumberU64(),
+			"hash", block.Hash(),
+			"err", parseErr,
+		)
+	} else {
+		log.Info("ENDORSEMENT_METADATA_BUILT",
+			"block", block.NumberU64(),
+			"hash", block.Hash(),
+			"metadataVersion", parsedMeta.Version,
+			"flags", parsedMeta.Flags,
+			"timeboostLen", len(parsedMeta.Timeboost),
+			"hasCommitmentRoot", parsedMeta.CommitmentRoot != (common.Hash{}),
+			"commitmentRoot", parsedMeta.CommitmentRoot,
+			"commitmentDataLen", len(parsedMeta.CommitmentData),
+		)
+
+		if parsedMeta.CommitmentRoot != (common.Hash{}) && len(parsedMeta.CommitmentData) > 0 {
+			parsedCerts, certErr := endorsement.ParseCommitmentData(parsedMeta.CommitmentData)
+			if certErr != nil {
+				log.Warn("ENDORSEMENT_COMMITMENTDATA_PARSE_FAILED",
+					"block", block.NumberU64(),
+					"hash", block.Hash(),
+					"commitmentRoot", parsedMeta.CommitmentRoot,
+					"commitmentDataLen", len(parsedMeta.CommitmentData),
+					"err", certErr,
+				)
+			} else {
+				recomputedRoot, _, rootErr := (&endorsement.DefaultRootBuilder{}).BuildRoot(parsedCerts)
+				if rootErr != nil {
+					log.Warn("ENDORSEMENT_COMMITMENTDATA_REBUILD_ROOT_FAILED",
+						"block", block.NumberU64(),
+						"hash", block.Hash(),
+						"certCount", len(parsedCerts),
+						"err", rootErr,
+					)
+				} else {
+					log.Info("ENDORSEMENT_COMMITMENTDATA_PARSED",
+						"block", block.NumberU64(),
+						"hash", block.Hash(),
+						"certCount", len(parsedCerts),
+						"commitmentRoot", parsedMeta.CommitmentRoot,
+						"recomputedRoot", recomputedRoot,
+						"rootMatch", recomputedRoot == parsedMeta.CommitmentRoot,
+					)
+				}
+				verifyErr := s.verifyParsedCommitmentCertificates(block, receipts, parsedCerts, hooks)
+				log.Info("ENDORSEMENT_COMMITMENT_CERT_VERIFY_INPUT",
+					"block", block.NumberU64(),
+					"hash", block.Hash(),
+					"blockTxCount", len(block.Transactions()),
+					"receiptCount", len(receipts),
+					"parsedCertCount", len(parsedCerts),
+				)
+				if verifyErr != nil {
+					return nil, fmt.Errorf("commitment certificate verification failed: %w", verifyErr)
+				}
+				log.Info("ENDORSEMENT_COMMITMENT_CERT_VERIFY_OK",
+					"block", block.NumberU64(),
+					"hash", block.Hash(),
+					"certCount", len(parsedCerts),
+				)	
+			}
+		}
+	}
 
 	_, err = s.consensus.WriteMessageFromSequencer(msgIdx, msgWithMeta, *msgResult, blockMetadata).Await(s.GetContext())
 	if err != nil {
@@ -848,22 +919,128 @@ func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.
 	return block, nil
 }
 
+
+// new
+const (
+	blockMetadataVersionTimeboostOnly   byte = 0
+	blockMetadataVersionWithEndorsement byte = 1
+)
+
+const (
+	blockMetadataFlagTimeboost   byte = 1 << 0
+	blockMetadataFlagEndorsement byte = 1 << 1
+)
+
+// 只生成 timeboost payload
+func (s *ExecutionEngine) buildTimeboostMetadataPayload(
+	block *types.Block,
+	timeboostedTxs map[common.Hash]struct{},
+) []byte {
+	if block == nil {
+		return nil
+	}
+
+	// 这里只生成纯 payload，不再在第一个字节放 version
+	bits := make([]byte, arbmath.DivCeil(uint64(len(block.Transactions())), 8))
+	if len(timeboostedTxs) == 0 {
+		return bits
+	}
+
+	for i, tx := range block.Transactions() {
+		if _, ok := timeboostedTxs[tx.Hash()]; ok {
+			bits[i/8] |= 1 << (i % 8)
+		}
+	}
+	return bits
+}
+
+func (s *ExecutionEngine) blockMetadataFromDecision(
+	block *types.Block,
+	timeboostedTxs map[common.Hash]struct{},
+	decision *endorsement.BlockProcessingDecision,
+) common.BlockMetadata {
+	// 只要区块里有交易，哪怕没有任何一笔 timeboosted，hasTimeboost 也可能是 true
+	// 因为 payload 里虽然全是 0，但长度不为 0
+	// hasTimeboost 现在实际上表示的是：是否有 timeboost payload 段，不是“是否存在至少一笔 timeboosted 交易”
+	timeboostPayload := s.buildTimeboostMetadataPayload(block, timeboostedTxs)
+
+	hasTimeboost := len(timeboostPayload) > 0
+	// 只有 CommitmentRoot 和 CommitmentData 都非空，才会走 version 1
+	// 未来需要考虑是否存在只有 CommitmentRoot 没有 CommitmentData 的情况
+	hasEndorsement := decision != nil &&
+		decision.AllSatisfied &&
+		decision.CommitmentRoot != (common.Hash{}) &&
+		len(decision.CommitmentData) > 0
+
+	// 如果没有 endorsement 信息，就保持旧格式（version 0）返回，
+	// 避免影响现有依赖旧 metadata 格式的路径。
+	if !hasEndorsement {
+		bits := make(common.BlockMetadata, 1+len(timeboostPayload))
+		bits[0] = blockMetadataVersionTimeboostOnly
+		copy(bits[1:], timeboostPayload)
+
+		log.Debug("ENDORSEMENT_METADATA_VERSION0",
+			"hasDecision", decision != nil,
+			"allSatisfied", decision != nil && decision.AllSatisfied,
+			"timeboostPayloadLen", len(timeboostPayload),
+		)
+		return bits
+	}
+
+	flags := byte(0)
+	if hasTimeboost {
+		flags |= blockMetadataFlagTimeboost
+	}
+	if hasEndorsement {
+		flags |= blockMetadataFlagEndorsement
+	}
+
+	// version(1) + flags(1) +
+	// timeboostLen(4) + timeboostPayload +
+	// commitmentRoot(32) +
+	// commitmentDataLen(4) + commitmentData
+	size := 1 + 1 + 4 + len(timeboostPayload) + 32 + 4 + len(decision.CommitmentData)
+	out := make(common.BlockMetadata, 0, size)
+
+	out = append(out, blockMetadataVersionWithEndorsement)
+	out = append(out, flags)
+
+	var tmp [4]byte
+	binary.BigEndian.PutUint32(tmp[:], uint32(len(timeboostPayload)))
+	out = append(out, tmp[:]...)
+	out = append(out, timeboostPayload...)
+
+	out = append(out, decision.CommitmentRoot[:]...)
+
+	binary.BigEndian.PutUint32(tmp[:], uint32(len(decision.CommitmentData)))
+	out = append(out, tmp[:]...)
+	out = append(out, decision.CommitmentData...)
+
+	log.Debug("ENDORSEMENT_METADATA_VERSION1",
+		"timeboostPayloadLen", len(timeboostPayload),
+		"commitmentRoot", decision.CommitmentRoot,
+		"commitmentDataLen", len(decision.CommitmentData),
+	)
+	return out
+}
+
 // blockMetadataFromBlock returns timeboosted byte array which says whether a transaction in the block was timeboosted
 // or not. The first byte of blockMetadata byte array is reserved to indicate the version,
 // starting from the second byte, (N)th bit would represent if (N)th tx is timeboosted or not, 1 means yes and 0 means no
 // blockMetadata[index / 8 + 1] & (1 << (index % 8)) != 0; where index = (N - 1), implies whether (N)th tx in a block is timeboosted
 // note that number of txs in a block will always lag behind (len(blockMetadata) - 1) * 8 but it won't lag more than a value of 7
 func (s *ExecutionEngine) blockMetadataFromBlock(block *types.Block, timeboostedTxs map[common.Hash]struct{}) common.BlockMetadata {
-	bits := make(common.BlockMetadata, 1+arbmath.DivCeil(uint64(len(block.Transactions())), 8))
-	if len(timeboostedTxs) == 0 {
-		return bits
-	}
-	for i, tx := range block.Transactions() {
-		if _, ok := timeboostedTxs[tx.Hash()]; ok {
-			bits[1+i/8] |= 1 << (i % 8)
-		}
-	}
-	return bits
+	// bits := make(common.BlockMetadata, 1+arbmath.DivCeil(uint64(len(block.Transactions())), 8))
+	// if len(timeboostedTxs) == 0 {
+	// 	return bits
+	// }
+	// for i, tx := range block.Transactions() {
+	// 	if _, ok := timeboostedTxs[tx.Hash()]; ok {
+	// 		bits[1+i/8] |= 1 << (i % 8)
+	// 	}
+	// }
+	// return bits
+	return s.blockMetadataFromDecision(block, timeboostedTxs, nil)
 }
 
 func (s *ExecutionEngine) SequenceDelayedMessage(message *arbostypes.L1IncomingMessage, delayedMsgIdx uint64) error {
@@ -1486,7 +1663,6 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		return nil, nil
 	}
 
-	log.Info("LOCAL_FAIL_PATH_CONFIG_V1")
 	log.Info(
 		"ENDORSEMENT_DEBUG entered processCandidateBlockEndorsement",
 		"hasBlock", block != nil,
@@ -1636,3 +1812,299 @@ func (s *ExecutionEngine) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
 	s.policyConfig = cfg
 }
 
+type ParsedBlockMetadata struct {
+	Version        byte
+	Flags          byte
+	Timeboost      []byte
+	CommitmentRoot common.Hash
+	CommitmentData []byte
+}
+
+// 当前 version 1 固定包含 timeboostLen/timeboostPayload/commitmentRoot/commitmentData，不支持按 flags 缺省字段。
+func ParseBlockMetadata(meta common.BlockMetadata) (*ParsedBlockMetadata, error) {
+	if len(meta) == 0 {
+		return nil, fmt.Errorf("empty block metadata")
+	}
+
+	switch meta[0] {
+	case blockMetadataVersionTimeboostOnly:
+		return &ParsedBlockMetadata{
+			Version:   meta[0],
+			Timeboost: append([]byte(nil), meta[1:]...),
+		}, nil
+
+	case blockMetadataVersionWithEndorsement:
+		if len(meta) < 1+1+4+32+4 {
+			return nil, fmt.Errorf("block metadata too short for endorsement format")
+		}
+
+		out := &ParsedBlockMetadata{
+			Version: meta[0],
+			Flags:   meta[1],
+		}
+
+		offset := 2
+		timeboostLen := int(binary.BigEndian.Uint32(meta[offset : offset+4]))
+		offset += 4
+
+		if len(meta) < offset+timeboostLen+32+4 {
+			return nil, fmt.Errorf("block metadata truncated before commitment fields")
+		}
+
+		out.Timeboost = append([]byte(nil), meta[offset:offset+timeboostLen]...)
+		offset += timeboostLen
+
+		copy(out.CommitmentRoot[:], meta[offset:offset+32])
+		offset += 32
+
+		commitmentDataLen := int(binary.BigEndian.Uint32(meta[offset : offset+4]))
+		offset += 4
+
+		if len(meta) < offset+commitmentDataLen {
+			return nil, fmt.Errorf("block metadata truncated before commitment data")
+		}
+
+		out.CommitmentData = append([]byte(nil), meta[offset:offset+commitmentDataLen]...)
+		return out, nil
+
+	default:
+		return nil, fmt.Errorf("unknown block metadata version %d", meta[0])
+	}
+}
+
+func (s *ExecutionEngine) SetCommitmentVerifierBLSPublicKeys(reg endorsement.BLSPublicKeyRegistry) {
+	if s.commitmentVerifierBLSPublicKeys != nil {
+		panic("commitmentVerifierBLSPublicKeys already set")
+	}
+	s.commitmentVerifierBLSPublicKeys = reg
+}
+
+func (s *ExecutionEngine) verifyParsedCommitmentCertificates(
+	block *types.Block,
+	receipts types.Receipts,
+	parsedCerts []*endorsement.TxEndorsementCertificate,
+	hooks *FullSequencingHooks,
+) error {
+	if block == nil {
+		return errors.New("nil block")
+	}
+	if hooks == nil {
+		return errors.New("nil hooks")
+	}
+	if len(parsedCerts) == 0 {
+		return nil
+	}
+	if len(receipts) != len(block.Transactions()) {
+		return fmt.Errorf("receipt count mismatch: txs=%d receipts=%d", len(block.Transactions()), len(receipts))
+	}
+	// 提交前自校验器，不是完全独立的离线 verifier
+	candidateBlock := hooks.CandidateBlock()
+	if candidateBlock == nil {
+		return errors.New("nil candidate block in hooks")
+	}
+	if len(candidateBlock.Txs) == 0 {
+		return errors.New("empty candidate block txs in hooks")
+	}
+
+	// cert 按 TxIndex 建索引；这里不要求 cert 数量 == block tx 数量，
+	// 只要求 metadata 中声明过的 cert 都能被验证。
+	certByTxIndex := make(map[int]*endorsement.TxEndorsementCertificate, len(parsedCerts))
+	for _, cert := range parsedCerts {
+		if cert == nil {
+			return errors.New("nil certificate in parsed certificates")
+		}
+		if cert.TxIndex < 0 {
+			return fmt.Errorf("negative certificate tx index: %d", cert.TxIndex)
+		}
+		if _, exists := certByTxIndex[cert.TxIndex]; exists {
+			return fmt.Errorf("duplicate certificate tx index: %d", cert.TxIndex)
+		}
+		certByTxIndex[cert.TxIndex] = cert
+	}
+
+	builder := &endorsement.DefaultRequestBuilder{}
+
+	for txIndex, cert := range certByTxIndex {
+		if txIndex >= len(candidateBlock.Txs) {
+			return fmt.Errorf("certificate tx index out of range: txIndex=%d candidateTxs=%d", txIndex, len(candidateBlock.Txs))
+		}
+		if txIndex >= len(receipts) {
+			return fmt.Errorf("certificate tx index out of receipt range: txIndex=%d receipts=%d", txIndex, len(receipts))
+		}
+
+		tx := candidateBlock.Txs[txIndex]
+		if tx == nil || tx.Tx == nil || tx.Policy == nil || tx.Policy.Policy == nil {
+			return fmt.Errorf("invalid candidate tx at txIndex=%d", txIndex)
+		}
+
+		// 这里要求 cert 的 txIndex 必须和 candidate tx 的 txIndex 对齐。
+		if tx.TxIndex != txIndex {
+			return fmt.Errorf("candidate tx index mismatch: candidate.TxIndex=%d mapKey=%d", tx.TxIndex, txIndex)
+		}
+
+		// 用真实 receipts 回填，确保重建 digest 时和最终块一致
+		tx.Receipt = receipts[txIndex]
+
+		req, err := builder.BuildRequest(&endorsement.CandidateBlockInput{
+			BlockHash:  block.Hash(),
+			ParentHash: block.ParentHash(),
+			BlockNum:   block.NumberU64(),
+		}, &endorsement.CandidateTxInput{
+			TxIndex: tx.TxIndex,
+			Tx:      tx.Tx,
+			Receipt: tx.Receipt,
+			Policy:  tx.Policy,
+		})
+		if err != nil {
+			return fmt.Errorf("build request for txIndex=%d: %w", txIndex, err)
+		}
+
+		// 基础字段一致性检查
+		if cert.TxHash != tx.Tx.Hash() {
+			return fmt.Errorf(
+				"certificate tx hash mismatch at txIndex=%d: cert=%s tx=%s",
+				txIndex, cert.TxHash.Hex(), tx.Tx.Hash().Hex(),
+			)
+		}
+		if cert.PolicyID != tx.Policy.Policy.ID {
+			return fmt.Errorf(
+				"certificate policy id mismatch at txIndex=%d: cert=%s policy=%s",
+				txIndex, cert.PolicyID, tx.Policy.Policy.ID,
+			)
+		}
+		if cert.Threshold != tx.Policy.Policy.Threshold {
+			return fmt.Errorf(
+				"certificate threshold mismatch at txIndex=%d: cert=%d policy=%d",
+				txIndex, cert.Threshold, tx.Policy.Policy.Threshold,
+			)
+		}
+		if uint32(len(cert.SignerIDs)) < cert.Threshold {
+			return fmt.Errorf(
+				"certificate signer count below threshold at txIndex=%d: signers=%d threshold=%d",
+				txIndex, len(cert.SignerIDs), cert.Threshold,
+			)
+		}
+
+		switch tx.Policy.Policy.AggregationType {
+		case endorsementpolicy.AggregationBLS:
+			if err := s.verifyBLSCertificate(req, cert); err != nil {
+				return fmt.Errorf("verify BLS certificate at txIndex=%d: %w", txIndex, err)
+			}
+
+		case endorsementpolicy.AggregationIndividualSignatures:
+			// 第一版只做结构检查；后续如有普通签名公钥体系，再补真正验签。
+			if len(cert.EncodedProof) == 0 {
+				return fmt.Errorf("empty individual-signatures proof at txIndex=%d", txIndex)
+			}
+
+		case endorsementpolicy.AggregationBitmapSignatures:
+			// 第一版只做结构检查；后续可 parse bitmap payload 并校验签名集。
+			if len(cert.EncodedProof) == 0 {
+				return fmt.Errorf("empty bitmap-signatures proof at txIndex=%d", txIndex)
+			}
+
+		case endorsementpolicy.AggregationCommitmentOnly:
+			// commitment-only 目前只有 commitment 语义，没有可恢复单签，先校验 proof 非空即可。
+			if len(cert.EncodedProof) == 0 {
+				return fmt.Errorf("empty commitment-only proof at txIndex=%d", txIndex)
+			}
+
+		default:
+			return fmt.Errorf("unsupported aggregation type %d at txIndex=%d", tx.Policy.Policy.AggregationType, txIndex)
+		}
+	}
+
+	return nil
+}
+
+var (
+	gethexecBLSInitOnce sync.Once
+	gethexecBLSInitErr  error
+)
+
+func ensureGethexecBLSInitialized() error {
+	gethexecBLSInitOnce.Do(func() {
+		gethexecBLSInitErr = bls.Init(bls.BLS12_381)
+	})
+	return gethexecBLSInitErr
+}
+
+type parsedBLSAggregatePayload struct {
+	Scheme              string                          `json:"scheme"`
+	SignerIDs           []endorsementpolicy.EndorserID `json:"signer_ids"`
+	AggregatedSignature []byte                          `json:"aggregated_signature"`
+}
+
+func (s *ExecutionEngine) verifyBLSCertificate(
+	req *endorsement.EndorsementRequest,
+	cert *endorsement.TxEndorsementCertificate,
+) error {
+	if req == nil {
+		return errors.New("nil endorsement request")
+	}
+	if cert == nil {
+		return errors.New("nil certificate")
+	}
+	if s.commitmentVerifierBLSPublicKeys == nil {
+		return errors.New("nil commitment verifier BLS public key registry")
+	}
+	if err := ensureGethexecBLSInitialized(); err != nil {
+		return fmt.Errorf("init bls: %w", err)
+	}
+
+	var payload parsedBLSAggregatePayload
+	if err := json.Unmarshal(cert.EncodedProof, &payload); err != nil {
+		return fmt.Errorf("unmarshal BLS aggregate payload: %w", err)
+	}
+	if len(payload.AggregatedSignature) == 0 {
+		return errors.New("empty aggregated signature")
+	}
+	if len(payload.SignerIDs) == 0 {
+		return errors.New("empty signer ids in BLS payload")
+	}
+
+	// 证书外层 signerIDs 与 proof 内 signerIDs 必须一致
+	if len(payload.SignerIDs) != len(cert.SignerIDs) {
+		return fmt.Errorf("signer id count mismatch: payload=%d cert=%d", len(payload.SignerIDs), len(cert.SignerIDs))
+	}
+	for i := range payload.SignerIDs {
+		if payload.SignerIDs[i] != cert.SignerIDs[i] {
+			return fmt.Errorf("signer id mismatch at position %d: payload=%s cert=%s", i, payload.SignerIDs[i], cert.SignerIDs[i])
+		}
+	}
+
+	var aggSig bls.Sign
+	if err := aggSig.Deserialize(payload.AggregatedSignature); err != nil {
+		return fmt.Errorf("deserialize aggregated signature: %w", err)
+	}
+
+	pubs := make([]bls.PublicKey, 0, len(payload.SignerIDs))
+	for _, id := range payload.SignerIDs {
+		pubBytes, err := s.commitmentVerifierBLSPublicKeys.GetPublicKey(id)
+		if err != nil {
+			return fmt.Errorf("get BLS public key for signer %s: %w", id, err)
+		}
+
+		var pub bls.PublicKey
+		if err := pub.Deserialize(pubBytes); err != nil {
+			return fmt.Errorf("deserialize BLS public key for signer %s: %w", id, err)
+		}
+		pubs = append(pubs, pub)
+	}
+
+	// 签名端已经改为 SignHash(req.SigningDigest[:])，
+	// 所以验证端不能再用 FastAggregateVerify(msg)，
+	// 而要走 VerifyAggregateHashes(hashes)。
+	hashes := make([][]byte, 0, len(payload.SignerIDs))
+	for range payload.SignerIDs {
+		h := make([]byte, len(req.SigningDigest))
+		copy(h, req.SigningDigest[:])
+		hashes = append(hashes, h)
+	}
+
+	if !aggSig.VerifyAggregateHashes(pubs, hashes) {
+		return errors.New("BLS VerifyAggregateHashes failed")
+	}
+
+	return nil
+}

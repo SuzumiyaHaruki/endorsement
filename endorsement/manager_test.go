@@ -117,22 +117,26 @@ func makeCandidateBlockInputWith2Txs(t *testing.T, threshold uint32) *CandidateB
 	return block
 }
 
-func makeDefaultTestManager(reject map[endorsementpolicy.EndorserID]bool) *DefaultEndorsementManager {
+func makeDefaultTestManager(
+	rejectByEndorser map[endorsementpolicy.EndorserID]bool,
+	rejectByTo map[common.Address]map[endorsementpolicy.EndorserID]bool,
+) *DefaultEndorsementManager {
 	return &DefaultEndorsementManager{
 		RequestBuilder: &DefaultRequestBuilder{},
 		Client: &MockEndorsementClient{
 			Rules: EndorsementRejectRules{
-				RejectByEndorser: reject,
+				RejectByEndorser:      rejectByEndorser,
+				RejectByToAndEndorser: rejectByTo,
 			},
 		},
-		Collector: &InMemoryResultCollector{},
+		Collector:          &InMemoryResultCollector{},
 		CertificateBuilder: &DefaultCertificateBuilder{},
 		RootBuilder:        &DefaultRootBuilder{},
 	}
 }
 
 func TestDefaultEndorsementManager_ProcessCandidateBlock_AllSatisfied_SingleTx(t *testing.T) {
-	manager := makeDefaultTestManager(nil)
+	manager := makeDefaultTestManager(nil, nil)
 	cfg := makeTestPolicyConfig()
 	block := makeCandidateBlockInputWith1Tx(t, 2)
 
@@ -187,7 +191,7 @@ func TestDefaultEndorsementManager_ProcessCandidateBlock_AllSatisfied_SingleTx(t
 }
 
 func TestDefaultEndorsementManager_ProcessCandidateBlock_AllSatisfied_MultiTx(t *testing.T) {
-	manager := makeDefaultTestManager(nil)
+	manager := makeDefaultTestManager(nil, nil)
 	cfg := makeTestPolicyConfig()
 	block := makeCandidateBlockInputWith2Txs(t, 2)
 
@@ -233,7 +237,7 @@ func TestDefaultEndorsementManager_ProcessCandidateBlock_RebuildRequired_SingleT
 		"A": true,
 		"B": true,
 		"C": true,
-	})
+	}, nil)
 	cfg := makeTestPolicyConfig()
 	block := makeCandidateBlockInputWith1Tx(t, 2)
 
@@ -277,11 +281,16 @@ func TestDefaultEndorsementManager_ProcessCandidateBlock_RebuildRequired_SingleT
 }
 
 func TestDefaultEndorsementManager_ProcessCandidateBlock_RebuildRequired_MultiTx(t *testing.T) {
-	manager := makeDefaultTestManager(map[endorsementpolicy.EndorserID]bool{
-		"A": true,
-		"B": true,
-		"C": true,
-	})
+	manager := makeDefaultTestManager(
+		nil,
+		map[common.Address]map[endorsementpolicy.EndorserID]bool{
+			common.HexToAddress("0x1111111111111111111111111111111111111111"): {
+				"A": true,
+				"B": true,
+				"C": true,
+			},
+		},
+	)
 	cfg := makeTestPolicyConfig()
 	block := makeCandidateBlockInputWith2Txs(t, 2)
 
@@ -300,7 +309,7 @@ func TestDefaultEndorsementManager_ProcessCandidateBlock_RebuildRequired_MultiTx
 		t.Fatal("decision.Rebuild = nil, want non-nil")
 	}
 
-	// 新语义：快速失败场景下，只剔除 definitely failed 的交易
+	// 只按 To 地址拒绝 tx0，因此只应返回 tx0
 	if len(decision.Rebuild.FailedTxIndexes) != 1 {
 		t.Fatalf("len(decision.Rebuild.FailedTxIndexes) = %d, want 1", len(decision.Rebuild.FailedTxIndexes))
 	}
@@ -308,7 +317,6 @@ func TestDefaultEndorsementManager_ProcessCandidateBlock_RebuildRequired_MultiTx
 		t.Fatalf("len(decision.Rebuild.FailedTxHashes) = %d, want 1", len(decision.Rebuild.FailedTxHashes))
 	}
 
-	// 在这个测试配置里，tx0 会先触发明确失败，因此只应返回 tx0
 	if decision.Rebuild.FailedTxIndexes[0] != 0 {
 		t.Fatalf("decision.Rebuild.FailedTxIndexes[0] = %d, want 0", decision.Rebuild.FailedTxIndexes[0])
 	}
@@ -316,10 +324,20 @@ func TestDefaultEndorsementManager_ProcessCandidateBlock_RebuildRequired_MultiTx
 		t.Fatalf("decision.Rebuild.FailedTxHashes[0] = %s, want %s",
 			decision.Rebuild.FailedTxHashes[0].Hex(), block.Txs[0].Tx.Hash().Hex())
 	}
+
+	if len(decision.Certificates) != 0 {
+		t.Fatalf("len(decision.Certificates) = %d, want 0", len(decision.Certificates))
+	}
+	if decision.CommitmentRoot != (common.Hash{}) {
+		t.Fatalf("decision.CommitmentRoot = %s, want zero hash", decision.CommitmentRoot.Hex())
+	}
+	if len(decision.CommitmentData) != 0 {
+		t.Fatalf("len(decision.CommitmentData) = %d, want 0", len(decision.CommitmentData))
+	}
 }
 
 func TestDefaultEndorsementManager_ProcessCandidateBlock_NilBlock(t *testing.T) {
-	manager := makeDefaultTestManager(nil)
+	manager := makeDefaultTestManager(nil, nil)
 	cfg := makeTestPolicyConfig()
 
 	decision, err := manager.ProcessCandidateBlock(context.Background(), cfg, nil)
@@ -335,7 +353,7 @@ func TestDefaultEndorsementManager_ProcessCandidateBlock_NilBlock(t *testing.T) 
 }
 
 func TestDefaultEndorsementManager_ProcessCandidateBlock_NilConfig(t *testing.T) {
-	manager := makeDefaultTestManager(nil)
+	manager := makeDefaultTestManager(nil, nil)
 	block := makeCandidateBlockInputWith1Tx(t, 2)
 
 	decision, err := manager.ProcessCandidateBlock(context.Background(), nil, block)
