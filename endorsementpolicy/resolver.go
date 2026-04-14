@@ -76,7 +76,7 @@ type RuleMatch struct {
 	IsContractCreate *bool
 }
 
-// PolicyRule 表示一条动态策略规则。
+// PolicyRule 表示一条动态策略规则。(匹配背书策略的规则，满足 PolicyRule 的条件，就可以匹配对应的规则)
 // Priority 越大，优先级越高。
 type PolicyRule struct {
 	ID          string
@@ -157,6 +157,7 @@ func (r *RuleBasedResolver) ResolveTxPolicy(
 	selector := extractSelector(tx)
 	isContractCreate := (tx.To() == nil)
 
+	// 循环匹配 rule 与 tx
 	for i := range r.Rules {
 		rule := &r.Rules[i]
 		if !rule.Enabled {
@@ -222,6 +223,7 @@ func (r *PolicyRule) match(
 	return true, buildMatchReason(r, to, from, selector, isContractCreate)
 }
 
+// 恢复出 from 地址
 func recoverSender(tx *types.Transaction) (*common.Address, error) {
 	if tx == nil {
 		return nil, ErrNilTx
@@ -246,6 +248,7 @@ func extractSelector(tx *types.Transaction) []byte {
 	return data[:4]
 }
 
+// 判断地址是否包含在地址切片里
 func containsAddress(list []common.Address, v common.Address) bool {
 	for _, x := range list {
 		if x == v {

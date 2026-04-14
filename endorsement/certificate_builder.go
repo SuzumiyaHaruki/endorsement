@@ -173,8 +173,6 @@ func (b *DefaultCertificateBuilder) buildBLSAggregateAndVerify(
 		return nil, fmt.Errorf("init BLS library: %w", err)
 	}
 
-	msg := req.SigningDigest[:]
-
 	sigs := make([]bls.Sign, 0, len(signerIDs))
 	pubs := make([]bls.PublicKey, 0, len(signerIDs))
 
@@ -208,14 +206,20 @@ func (b *DefaultCertificateBuilder) buildBLSAggregateAndVerify(
 	var aggSig bls.Sign
 	aggSig.Aggregate(sigs)
 
-	// 关键：在 builder 内部做 FastAggregateVerify
-	// 所有 signer 对同一条 32-byte digest 签名，正符合 FastAggregateVerify 语义。
-	if !aggSig.FastAggregateVerify(pubs, msg) {
-		return nil, errors.New("BLS FastAggregateVerify failed")
+	// SignHash(req.SigningDigest[:]) 对应 VerifyAggregateHashes，而不是 FastAggregateVerify。
+	hashes := make([][]byte, 0, len(signerIDs))
+	for range signerIDs {
+		h := make([]byte, len(req.SigningDigest))
+		copy(h, req.SigningDigest[:])
+		hashes = append(hashes, h)
+	}
+
+	if !aggSig.VerifyAggregateHashes(pubs, hashes) {
+		return nil, errors.New("BLS VerifyAggregateHashes failed")
 	}
 
 	payload := blsAggregatePayload{
-		Scheme:              "bls12-381-herumi-fast-aggregate-verify",
+		Scheme:              "bls12-381-herumi-verify-aggregate-hashes",
 		SignerIDs:           signerIDs,
 		AggregatedSignature: aggSig.Serialize(),
 	}

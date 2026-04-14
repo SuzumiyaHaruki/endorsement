@@ -2,7 +2,7 @@ package endorsement
 
 import (
 	"context"
-
+	"errors"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/offchainlabs/nitro/endorsementpolicy"
 )
@@ -16,6 +16,10 @@ func (c *MockEndorsementClient) RequestEndorsement(
 	endorser endorsementpolicy.EndorserID,
 	req *EndorsementRequest,
 ) (*EndorsementResponse, error) {
+	if req == nil { 
+		return nil, errors.New("nil endorsement request") 
+	}
+
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

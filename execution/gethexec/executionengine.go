@@ -635,110 +635,6 @@ func writeAndLog(pprof, trace *bytes.Buffer) {
 	log.Info("Transactions sequencing took longer than 2 seconds, created pprof and trace files", "pprof", pprofFile, "traceFile", traceFile)
 }
 
-// func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.L1IncomingMessageHeader, hooks *FullSequencingHooks, timeboostedTxs map[common.Hash]struct{}) (*types.Block, error) {
-// 	lastBlockHeader, err := s.getCurrentHeader()
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	statedb, err := s.bc.StateAt(lastBlockHeader.Root)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	if s.addressChecker != nil {
-// 		statedb.SetAddressChecker(s.addressChecker)
-// 	}
-// 	lastBlock := s.bc.GetBlock(lastBlockHeader.Hash(), lastBlockHeader.Number.Uint64())
-// 	if lastBlock == nil {
-// 		return nil, errors.New("can't find block for current header")
-// 	}
-// 	var witness *stateless.Witness
-// 	var witnessStats *stateless.WitnessStats
-// 	if s.bc.GetVMConfig().StatelessSelfValidation {
-// 		witness, err = stateless.NewWitness(lastBlock.Header(), s.bc)
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		if s.bc.GetVMConfig().EnableWitnessStats {
-// 			witnessStats = stateless.NewWitnessStats()
-// 		}
-// 	}
-// 	statedb.StartPrefetcher("Sequencer", witness, witnessStats)
-// 	defer statedb.StopPrefetcher()
-// 	delayedMessagesRead := lastBlockHeader.Nonce.Uint64()
-
-// 	startTime := time.Now()
-// 	block, receipts, err := arbos.ProduceBlockAdvanced(
-// 		header,
-// 		delayedMessagesRead,
-// 		lastBlockHeader,
-// 		statedb,
-// 		s.bc,
-// 		hooks,
-// 		false,
-// 		core.NewMessageCommitContext(s.wasmTargets),
-// 		s.exposeMultiGas,
-// 	)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	// new
-// 	if err := s.processCandidateBlockEndorsement(s.GetContext(), block, receipts, hooks); err != nil {
-// 		return nil, err
-// 	}
-// 	blockCalcTime := time.Since(startTime)
-// 	blockExecutionTimer.Update(blockCalcTime.Nanoseconds())
-
-// 	if len(receipts) == 0 {
-// 		return nil, nil
-// 	}
-
-// 	allTxsErrored := true
-// 	for _, err := range hooks.txErrors {
-// 		if err == nil {
-// 			allTxsErrored = false
-// 			break
-// 		}
-// 	}
-// 	if allTxsErrored {
-// 		return nil, nil
-// 	}
-
-// 	msg, err := hooks.MessageFromTxes(header)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	msgIdx, err := s.BlockNumberToMessageIndex(lastBlockHeader.Number.Uint64() + 1)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	msgWithMeta := arbostypes.MessageWithMetadata{
-// 		Message:             msg,
-// 		DelayedMessagesRead: delayedMessagesRead,
-// 	}
-// 	msgResult, err := s.resultFromHeader(block.Header())
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	blockMetadata := s.blockMetadataFromBlock(block, timeboostedTxs)
-// 	_, err = s.consensus.WriteMessageFromSequencer(msgIdx, msgWithMeta, *msgResult, blockMetadata).Await(s.GetContext())
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	// Only write the block after we've written the messages, so if the node dies in the middle of this,
-// 	// it will naturally recover on startup by regenerating the missing block.
-// 	err = s.appendBlock(block, statedb, receipts, blockCalcTime)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	s.cacheL1PriceDataOfMsg(msgIdx, block, false)
-
-// 	return block, nil
-// }
 
 func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.L1IncomingMessageHeader, hooks *FullSequencingHooks, timeboostedTxs map[common.Hash]struct{}) (*types.Block, error) {
 	lastBlockHeader, err := s.getCurrentHeader()
@@ -831,8 +727,6 @@ func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.
 		return nil, err
 	}
 
-	// _ = decision
-	// blockMetadata := s.blockMetadataFromBlock(block, timeboostedTxs)
 	blockMetadata := s.blockMetadataFromDecision(block, timeboostedTxs, decision)
 
 	parsedMeta, parseErr := ParseBlockMetadata(blockMetadata)
@@ -1677,15 +1571,6 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		return nil, nil
 	}
 
-	candidateBlock.Block = block
-	candidateBlock.ParentHash = block.ParentHash()
-	candidateBlock.BlockHash = block.Hash()
-	candidateBlock.BlockNum = block.NumberU64()
-
-	if err := candidateBlock.AttachReceipts(receipts); err != nil {
-		return nil, err
-	}
-
 	log.Info(
 		"ENDORSEMENT_DEBUG candidate block attached",
 		"hasCandidateBlock", candidateBlock != nil,
@@ -1694,29 +1579,47 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		"blockHash", block.Hash(),
 	)
 
+	// disabled / baseline 模式：没有接入 endorsement manager 或 policyConfig 时，直接跳过背书。
+	// 这样后续会按普通出块路径继续提交区块，不触发 rebuild。
+	if s.candidateBlockEndorser == nil || s.policyConfig == nil {
+		log.Info(
+			"ENDORSEMENT_DISABLED_SKIP",
+			"l2Block", block.NumberU64(),
+			"blockHash", block.Hash(),
+			"hasEndorser", s.candidateBlockEndorser != nil,
+			"hasPolicyConfig", s.policyConfig != nil,
+			"txCount", len(candidateBlock.Txs),
+		)
+		return nil, nil
+	}
+
 	log.Info(
 		"ENDORSEMENT_DEBUG endorser wiring",
 		"hasEndorser", s.candidateBlockEndorser != nil,
 		"hasPolicyConfig", s.policyConfig != nil,
 	)
 
-	// 如果当前还没有真正注入 manager/config，就只打印候选交易信息，并视为“跳过背书”
-	if s.candidateBlockEndorser == nil || s.policyConfig == nil {
-		for _, tx := range candidateBlock.Txs {
-			if tx == nil || tx.Tx == nil || tx.Policy == nil || tx.Policy.Policy == nil {
-				continue
-			}
-			log.Info(
-				"mock endorsement stage sees candidate tx",
-				"l2Block", block.NumberU64(),
-				"txIndex", tx.TxIndex,
-				"txHash", tx.Tx.Hash(),
-				"policyID", tx.Policy.Policy.ID,
-				"threshold", tx.Policy.Policy.Threshold,
-				"hasReceipt", tx.Receipt != nil,
-			)
-		}
-		return nil, nil
+	candidateBlock.Block = block
+	candidateBlock.ParentHash = block.ParentHash()
+	candidateBlock.BlockHash = block.Hash()
+	candidateBlock.BlockNum = block.NumberU64()
+
+	if err := candidateBlock.AttachReceipts(receipts); err != nil {
+		log.Error(
+			"ENDORSEMENT_DEBUG failed to attach receipts to candidate block",
+			"l2Block", block.NumberU64(),
+			"err", err,
+		)
+		return nil, err
+	}
+
+	if err := candidateBlock.Validate(); err != nil {
+		log.Error(
+			"ENDORSEMENT_DEBUG candidate block validation failed before endorsement",
+			"l2Block", block.NumberU64(),
+			"err", err,
+		)
+		return nil, err
 	}
 
 	// 转成 endorsement 包的 CandidateBlockInput
@@ -1798,9 +1701,13 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 	return decision, nil
 }
 
+
 func (s *ExecutionEngine) SetCandidateBlockEndorser(m endorsement.EndorsementManager) {
 	if s.candidateBlockEndorser != nil {
 		panic("candidateBlockEndorser already set")
+	}
+	if m == nil{
+		panic("candidateBlockEndorser should not be nil")
 	}
 	s.candidateBlockEndorser = m
 }
@@ -1808,6 +1715,9 @@ func (s *ExecutionEngine) SetCandidateBlockEndorser(m endorsement.EndorsementMan
 func (s *ExecutionEngine) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
 	if s.policyConfig != nil {
 		panic("policyConfig already set")
+	}
+	if cfg == nil{
+		panic("policyConfig should not be nil")
 	}
 	s.policyConfig = cfg
 }
@@ -1943,8 +1853,7 @@ func (s *ExecutionEngine) verifyParsedCommitmentCertificates(
 		}
 
 		// 用真实 receipts 回填，确保重建 digest 时和最终块一致
-		tx.Receipt = receipts[txIndex]
-
+		Receipt := receipts[txIndex]
 		req, err := builder.BuildRequest(&endorsement.CandidateBlockInput{
 			BlockHash:  block.Hash(),
 			ParentHash: block.ParentHash(),
@@ -1952,7 +1861,7 @@ func (s *ExecutionEngine) verifyParsedCommitmentCertificates(
 		}, &endorsement.CandidateTxInput{
 			TxIndex: tx.TxIndex,
 			Tx:      tx.Tx,
-			Receipt: tx.Receipt,
+			Receipt: Receipt,
 			Policy:  tx.Policy,
 		})
 		if err != nil {

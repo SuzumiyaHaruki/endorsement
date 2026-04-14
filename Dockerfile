@@ -70,15 +70,26 @@ COPY contracts-legacy contracts-legacy/
 COPY contracts-local contracts-local/
 COPY contracts contracts/
 COPY safe-smart-account safe-smart-account/
-RUN cd safe-smart-account && npm install
+#RUN cd safe-smart-account && npm install
+RUN cd safe-smart-account && \
+    npm config set registry https://registry.npmmirror.com && \
+    npm config set proxy http://192.168.89.1:7890 && \
+    npm config set https-proxy http://192.168.89.1:7890 && \
+    npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm install
 COPY Makefile .
 RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
     export HTTP_PROXY=http://192.168.89.1:7890 HTTPS_PROXY=http://192.168.89.1:7890 http_proxy=http://192.168.89.1:7890 https_proxy=http://192.168.89.1:7890 && \
-    yarn config set registry https://registry.npmmirror.com && \
-    yarn config set network-timeout 600000 -g && \
-    yarn config set network-concurrency 2 -g && \
-    . ~/.bashrc && \
-    NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-solidity
+    yarn config set registry https://registry.npmjs.org && \
+    yarn config set network-timeout 600000 && \
+    yarn config set network-concurrency 2 && \
+    for i in 1 2 3 4 5; do \
+      NITRO_BUILD_IGNORE_TIMESTAMPS=1 make build-solidity && break; \
+      echo "build-solidity failed, retry $i"; \
+      sleep 5; \
+    done
 
 FROM debian:bookworm-20231218 AS wasm-base
 WORKDIR /workspace
@@ -263,9 +274,31 @@ COPY ./scripts/download-machine.sh .
 #RUN ./download-machine.sh consensus-v50-rc.6 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2
 #RUN ./download-machine.sh consensus-v40 0xdb698a2576298f25448bc092e52cf13b1e24141c997135d70f217d674bbeb69a
 #RUN ./download-machine.sh consensus-v60-alpha.2 0x5a79438ff2ab312234ee23839ea03b0c9348e856298b5ab1d2c067bf3c725bd0
-RUN ./download-machine.sh consensus-v50 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2
-RUN ./download-machine.sh consensus-v51 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499
-RUN mkdir -p 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && ln -sfT 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c latest && cd 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && echo "0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c" > module-root.txt
+#RUN ./download-machine.sh consensus-v50 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2
+#RUN ./download-machine.sh consensus-v51 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499
+#RUN mkdir -p 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && ln -sfT 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c latest && cd 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && echo "0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c" > module-root.txt
+COPY predownloaded-machines/consensus-v50/ /tmp/predownloaded-machines/consensus-v50/
+COPY predownloaded-machines/consensus-v51/ /tmp/predownloaded-machines/consensus-v51/
+
+RUN mkdir -p 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2 && \
+    ln -sfT 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2 latest && \
+    cp /tmp/predownloaded-machines/consensus-v50/machine.wavm.br 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2/ && \
+    if [ -f /tmp/predownloaded-machines/consensus-v50/replay.wasm ]; then cp /tmp/predownloaded-machines/consensus-v50/replay.wasm 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2/; fi && \
+    cd 0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2 && \
+    echo "0x2c54f6e9e378ba320ed9c713a1d9f067a572b1437e4f1c40b1a915d3066c04f2" > module-root.txt
+
+RUN mkdir -p 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499 && \
+    ln -sfT 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499 latest && \
+    cp /tmp/predownloaded-machines/consensus-v51/machine.wavm.br 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499/ && \
+    if [ -f /tmp/predownloaded-machines/consensus-v51/replay.wasm ]; then cp /tmp/predownloaded-machines/consensus-v51/replay.wasm 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499/; fi && \
+    cd 0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499 && \
+    echo "0x8a7513bf7bb3e3db04b0d982d0e973bcf57bf8b88aef7c6d03dba3a81a56a499" > module-root.txt
+
+RUN mkdir -p 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && \
+    ln -sfT 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c latest && \
+    cd 0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c && \
+    echo "0xc2c02df561d4afaf9a1d6785f70098ec3874765c638e3cb6dbe8d3c83333e14c" > module-root.txt
+
 
 FROM golang:1.25-bookworm AS node-builder
 WORKDIR /workspace
@@ -366,7 +399,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy && \
     apt-get -o Acquire::Retries=5 -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false update && \
     apt-get -o Acquire::Retries=5 -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false install -y --fix-missing \
-    curl procps jq rsync \
+    curl procps jq rsync iproute2 \
     node-ws vim-tiny python3 \
     dnsutils && \
     apt-get clean && \

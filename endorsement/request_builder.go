@@ -31,6 +31,23 @@ func copyToAddress(tx *types.Transaction) *common.Address {
 	return &to
 }
 
+func normalizeReceiptForRemote(r *types.Receipt) *types.Receipt {
+	if r == nil {
+		return nil
+	}
+
+	// 浅拷贝一份，避免修改原始 receipt
+	cp := *r
+
+	// go-ethereum 的 Receipt JSON 反序列化要求 logs 字段存在。
+	// 对普通转账，没有日志时要保证它是 [] 而不是 nil。
+	if cp.Logs == nil {
+		cp.Logs = []*types.Log{}
+	}
+
+	return &cp
+}
+
 func (b *DefaultRequestBuilder) BuildRequest(
 	block *CandidateBlockInput,
 	tx *CandidateTxInput,
@@ -46,11 +63,12 @@ func (b *DefaultRequestBuilder) BuildRequest(
 
 	to := copyToAddress(tx.Tx)
 
-	// 如果无法恢复 from，则将其设为空值
 	from, err := recoverTxSender(tx.Tx)
 	if err != nil {
 		from = nil
 	}
+
+	normalizedReceipt := normalizeReceiptForRemote(tx.Receipt)
 
 	payload := DecisionPayload{
 		ParentHash: block.ParentHash,
@@ -58,7 +76,7 @@ func (b *DefaultRequestBuilder) BuildRequest(
 		BlockNum:   block.BlockNum,
 		TxHash:     tx.Tx.Hash(),
 		TxIndex:    tx.TxIndex,
-		Receipt:    tx.Receipt,
+		Receipt:    normalizedReceipt,
 		To:         to,
 		From:       from,
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"sort"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -186,14 +187,46 @@ func (b *CandidateBlockInput) Validate() error {
 	if b == nil {
 		return ErrNilCandidateBlockInput
 	}
-	for _, tx := range b.Txs {
+
+	// 校验 block 基础字段
+	if b.BlockHash == (common.Hash{}) {
+		return errors.New("block hash is zero")
+	}
+	if b.ParentHash == (common.Hash{}) {
+		return errors.New("parent hash is zero")
+	}
+	if b.BlockNum == 0 {
+		return errors.New("block number cannot be zero")
+	}
+
+	// map 用来检查 TxIndex 重复
+	txIndexMap := make(map[int]struct{}, len(b.Txs))
+
+	for i, tx := range b.Txs {
 		if tx == nil || tx.Tx == nil || tx.Policy == nil {
-			return errors.New("invalid candidate tx input")
+			return fmt.Errorf("invalid candidate tx at slice index %d", i)
 		}
 		if err := tx.Policy.Validate(); err != nil {
-			return err
+			return fmt.Errorf("policy validation failed at txIndex=%d: %w", tx.TxIndex, err)
 		}
+
+		// TxIndex 非负
+		if tx.TxIndex < 0 {
+			return fmt.Errorf("txIndex < 0 at slice index %d: txIndex=%d", i, tx.TxIndex)
+		}
+
+		// TxIndex 和 slice 下标对齐
+		if tx.TxIndex != i {
+			return fmt.Errorf("txIndex mismatch at slice index %d: TxIndex=%d", i, tx.TxIndex)
+		}
+
+		// 检查重复
+		if _, exists := txIndexMap[tx.TxIndex]; exists {
+			return fmt.Errorf("duplicate TxIndex found: %d", tx.TxIndex)
+		}
+		txIndexMap[tx.TxIndex] = struct{}{}
 	}
+
 	return nil
 }
 

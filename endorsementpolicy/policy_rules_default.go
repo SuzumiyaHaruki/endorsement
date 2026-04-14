@@ -2,11 +2,13 @@ package endorsementpolicy
 
 import "github.com/ethereum/go-ethereum/common"
 
-// 创建了两个背书策略规则，如果 to 地址为 0x1111111111111111111111111111111111111111 或 是合约创建交易，则使用 strict 策略
 func BuildDefaultExperimentRules(
+	failAddr common.Address,
 	strictPolicy *EndorsementPolicy,
 	defaultPolicy *EndorsementPolicy,
 ) []PolicyRule {
+	_ = defaultPolicy // 先保留这个参数，方便以后扩展更多默认规则
+
 	return []PolicyRule{
 		{
 			ID:          "strict-to-fail-address",
@@ -15,7 +17,7 @@ func BuildDefaultExperimentRules(
 			Enabled:     true,
 			Match: RuleMatch{
 				ToEquals: []common.Address{
-					common.HexToAddress("0x1111111111111111111111111111111111111111"),
+					failAddr,
 				},
 			},
 			Policy: strictPolicy,

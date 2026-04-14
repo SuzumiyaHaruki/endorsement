@@ -2,10 +2,10 @@ package endorsement
 
 import (
 	"errors"
+	"sort"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/offchainlabs/nitro/endorsementpolicy"
 )
 
@@ -95,6 +95,7 @@ func (c *InMemoryResultCollector) RecordResponse(
 }
 
 func (c *InMemoryResultCollector) updateState(st *txCollectState) {
+	// 背书阈值已经满足
 	if uint32(len(st.accepted)) >= st.policy.Threshold {
 		st.satisfied = true
 		return
@@ -102,6 +103,7 @@ func (c *InMemoryResultCollector) updateState(st *txCollectState) {
 
 	remaining := st.total - len(st.responded)
 	maxPossibleAccepted := len(st.accepted) + remaining
+	// 背书阈值已经无法满足
 	if uint32(maxPossibleAccepted) < st.policy.Threshold {
 		st.failed = true
 	}
@@ -145,8 +147,18 @@ func (c *InMemoryResultCollector) GetDefinitelyFailedTxs() *RebuildInstruction {
 }
 
 func (c *InMemoryResultCollector) buildRebuildInstructionLocked(includeUnsatisfied bool) *RebuildInstruction {
+	indexes := make([]int, 0, len(c.states))
+	for txIndex := range c.states {
+		indexes = append(indexes, txIndex)
+	}
+	sort.Ints(indexes)
+
 	out := &RebuildInstruction{}
-	for txIndex, st := range c.states {
+	for _, txIndex := range indexes {
+		st := c.states[txIndex]
+		if st == nil {
+			continue
+		}
 		if st.failed || (includeUnsatisfied && !st.satisfied) {
 			out.FailedTxIndexes = append(out.FailedTxIndexes, txIndex)
 			out.FailedTxHashes = append(out.FailedTxHashes, st.txHash)
@@ -154,6 +166,7 @@ func (c *InMemoryResultCollector) buildRebuildInstructionLocked(includeUnsatisfi
 	}
 	return out
 }
+
 
 func (c *InMemoryResultCollector) GetAcceptedResults(
 	txIndex int,

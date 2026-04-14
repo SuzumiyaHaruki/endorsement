@@ -4,11 +4,14 @@ package gethexec
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"reflect"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -33,6 +36,8 @@ import (
 	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/offchainlabs/nitro/consensus"
 	"github.com/offchainlabs/nitro/consensus/consensusrpcclient"
+	"github.com/offchainlabs/nitro/endorsement"
+	"github.com/offchainlabs/nitro/endorsementpolicy"
 	"github.com/offchainlabs/nitro/execution"
 	executionrpcserver "github.com/offchainlabs/nitro/execution/rpcserver"
 	"github.com/offchainlabs/nitro/solgen/go/precompilesgen"
@@ -44,10 +49,6 @@ import (
 	"github.com/offchainlabs/nitro/util/rpcclient"
 	"github.com/offchainlabs/nitro/util/rpcserver"
 	"github.com/offchainlabs/nitro/util/stopwaiter"
-
-	// new
-	"github.com/offchainlabs/nitro/endorsementpolicy"
-	"github.com/offchainlabs/nitro/endorsement"
 )
 
 type StylusTargetConfig struct {
@@ -121,6 +122,127 @@ func TxIndexerConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	f.Duration(prefix+".min-batch-delay", DefaultTxIndexerConfig.MinBatchDelay, "minimum delay between transaction indexing/unindexing batches; the bigger the delay, the more blocks can be included in each batch")
 }
 
+// new
+type EndorsementExperimentConfig struct {
+	Enable bool `koanf:"enable"`
+
+	// disabled | local | remote
+	Mode string `koanf:"mode"`
+
+	DefaultThreshold uint32 `koanf:"default-threshold"`
+	StrictThreshold  uint32 `koanf:"strict-threshold"`
+
+	// bls | individual | bitmap | commitment-only
+	DefaultAggregation string `koanf:"default-aggregation"`
+	StrictAggregation  string `koanf:"strict-aggregation"`
+
+	BlockEndorsementTimeout time.Duration `koanf:"block-endorsement-timeout"`
+	MaxRebuildRounds        int           `koanf:"max-rebuild-rounds"`
+
+	FailToAddress string `koanf:"fail-to-address"`
+
+	EndorserAURL string `koanf:"endorser-a-url"`
+	EndorserBURL string `koanf:"endorser-b-url"`
+	EndorserCURL string `koanf:"endorser-c-url"`
+
+	EndorserAPubKeyHex string `koanf:"endorser-a-pubkey"`
+	EndorserBPubKeyHex string `koanf:"endorser-b-pubkey"`
+	EndorserCPubKeyHex string `koanf:"endorser-c-pubkey"`
+}
+
+func (c *EndorsementExperimentConfig) Validate() error {
+	if c == nil {
+		return errors.New("nil endorsement experiment config")
+	}
+
+	switch c.Mode {
+	case "disabled", "local", "remote":
+	default:
+		return fmt.Errorf("invalid endorsement experiment mode: %s", c.Mode)
+	}
+
+	if c.DefaultThreshold == 0 {
+		return errors.New("endorsement default-threshold must be greater than 0")
+	}
+	if c.StrictThreshold == 0 {
+		return errors.New("endorsement strict-threshold must be greater than 0")
+	}
+	if c.BlockEndorsementTimeout <= 0 {
+		return errors.New("endorsement block-endorsement-timeout must be greater than 0")
+	}
+	if c.MaxRebuildRounds < 0 {
+		return errors.New("endorsement max-rebuild-rounds must be non-negative")
+	}
+
+	if c.FailToAddress == "" || !common.IsHexAddress(c.FailToAddress) {
+		return fmt.Errorf("invalid endorsement fail-to-address: %q", c.FailToAddress)
+	}
+
+	if _, err := parseAggregationType(c.DefaultAggregation); err != nil {
+		return fmt.Errorf("invalid default aggregation: %w", err)
+	}
+	if _, err := parseAggregationType(c.StrictAggregation); err != nil {
+		return fmt.Errorf("invalid strict aggregation: %w", err)
+	}
+
+	if c.Mode == "remote" {
+		if strings.TrimSpace(c.EndorserAURL) == "" ||
+			strings.TrimSpace(c.EndorserBURL) == "" ||
+			strings.TrimSpace(c.EndorserCURL) == "" {
+			return errors.New("remote mode requires non-empty endorser URLs")
+		}
+		if strings.TrimSpace(c.EndorserAPubKeyHex) == "" ||
+			strings.TrimSpace(c.EndorserBPubKeyHex) == "" ||
+			strings.TrimSpace(c.EndorserCPubKeyHex) == "" {
+			return errors.New("remote mode requires non-empty endorser public keys")
+		}
+	}
+
+	return nil
+}
+
+var DefaultEndorsementExperimentConfig = EndorsementExperimentConfig{
+	Enable: true,
+	Mode:   "remote",
+
+	DefaultThreshold: 2,
+	StrictThreshold:  3,
+
+	DefaultAggregation: "bls",
+	StrictAggregation:  "bls",
+
+	BlockEndorsementTimeout: 2 * time.Second,
+	MaxRebuildRounds:        3,
+
+	FailToAddress: "0x1111111111111111111111111111111111111111",
+
+	EndorserAURL: "http://endorser-a:9001",
+	EndorserBURL: "http://endorser-b:9002",
+	EndorserCURL: "http://endorser-c:9003",
+
+	EndorserAPubKeyHex: "a3f44d234234430c7c7c3268d5f49a674edc2281bb0aec9ea14be8b598c22c7ad0d909d14b35a4c5d64e155dd28d81ba",
+	EndorserBPubKeyHex: "ad10f131ec7851674af913cbc0a62ebb7efd981535e3a0fdcdadc8c7e33bd7e494d4488b018d55659a7d44346b31ebc1",
+	EndorserCPubKeyHex: "90f21d7ed995c790d21df79dcc2ad4e1464520108b46767c9326b56c6cce09bb9356962c06471ac1185ea9bc9df43a9b",
+}
+
+func EndorsementExperimentConfigAddOptions(prefix string, f *pflag.FlagSet) {
+	f.Bool(prefix+".enable", DefaultEndorsementExperimentConfig.Enable, "enable endorsement experiment wiring")
+	f.String(prefix+".mode", DefaultEndorsementExperimentConfig.Mode, "endorsement mode: disabled | local | remote")
+	f.Uint32(prefix+".default-threshold", DefaultEndorsementExperimentConfig.DefaultThreshold, "endorsement threshold for default policy")
+	f.Uint32(prefix+".strict-threshold", DefaultEndorsementExperimentConfig.StrictThreshold, "endorsement threshold for strict policy")
+	f.String(prefix+".default-aggregation", DefaultEndorsementExperimentConfig.DefaultAggregation, "endorsement aggregation for default policy: bls | individual | bitmap | commitment-only")
+	f.String(prefix+".strict-aggregation", DefaultEndorsementExperimentConfig.StrictAggregation, "endorsement aggregation for strict policy: bls | individual | bitmap | commitment-only")
+	f.Duration(prefix+".block-endorsement-timeout", DefaultEndorsementExperimentConfig.BlockEndorsementTimeout, "endorsement timeout for one candidate block")
+	f.Int(prefix+".max-rebuild-rounds", DefaultEndorsementExperimentConfig.MaxRebuildRounds, "max rebuild rounds after endorsement failure")
+	f.String(prefix+".fail-to-address", DefaultEndorsementExperimentConfig.FailToAddress, "transactions sent to this address use strict endorsement policy")
+	f.String(prefix+".endorser-a-url", DefaultEndorsementExperimentConfig.EndorserAURL, "remote URL for endorser A")
+	f.String(prefix+".endorser-b-url", DefaultEndorsementExperimentConfig.EndorserBURL, "remote URL for endorser B")
+	f.String(prefix+".endorser-c-url", DefaultEndorsementExperimentConfig.EndorserCURL, "remote URL for endorser C")
+	f.String(prefix+".endorser-a-pubkey", DefaultEndorsementExperimentConfig.EndorserAPubKeyHex, "hex-encoded BLS public key for endorser A")
+	f.String(prefix+".endorser-b-pubkey", DefaultEndorsementExperimentConfig.EndorserBPubKeyHex, "hex-encoded BLS public key for endorser B")
+	f.String(prefix+".endorser-c-pubkey", DefaultEndorsementExperimentConfig.EndorserCPubKeyHex, "hex-encoded BLS public key for endorser C")
+}
+
 type Config struct {
 	ParentChainReader           headerreader.Config    `koanf:"parent-chain-reader" reload:"hot"`
 	Sequencer                   SequencerConfig        `koanf:"sequencer" reload:"hot"`
@@ -143,6 +265,7 @@ type Config struct {
 	ConsensusRPCClient          rpcclient.ClientConfig `koanf:"consensus-rpc-client" reload:"hot"`
 
 	forwardingTarget string
+	EndorsementExperiment EndorsementExperimentConfig `koanf:"endorsement-experiment"`
 }
 
 func (c *Config) Validate() error {
@@ -172,6 +295,9 @@ func (c *Config) Validate() error {
 	if err := c.ConsensusRPCClient.Validate(); err != nil {
 		return fmt.Errorf("error validating ConsensusRPCClient config: %w", err)
 	}
+	if err := c.EndorsementExperiment.Validate(); err != nil {
+		return fmt.Errorf("error validating EndorsementExperiment config: %w", err)
+	}
 	return nil
 }
 
@@ -195,6 +321,7 @@ func ConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	LiveTracingConfigAddOptions(prefix+".vmtrace", f)
 	rpcserver.ConfigAddOptions(prefix+".rpc-server", "execution", f)
 	rpcclient.RPCClientAddOptions(prefix+".consensus-rpc-client", f, &ConfigDefault.ConsensusRPCClient)
+	EndorsementExperimentConfigAddOptions(prefix+".endorsement-experiment", f)
 }
 
 type LiveTracingConfig struct {
@@ -241,6 +368,8 @@ var ConfigDefault = Config{
 		ArgLogLimit:               2048,
 		WebsocketMessageSizeLimit: 256 * 1024 * 1024,
 	},
+
+	EndorsementExperiment: DefaultEndorsementExperimentConfig,
 }
 
 type ConfigFetcher interface {
@@ -281,86 +410,111 @@ func CreateExecutionNode(
 	config := configFetcher.Get()
 
 	execEngine := NewExecutionEngine(l2BlockChain, syncTillBlock, config.ExposeMultiGas)
-	// new
-	defaultPolicy, strictPolicy := buildDefaultEndorsementPolicies()
 
-	rules := endorsementpolicy.BuildDefaultExperimentRules(strictPolicy, defaultPolicy)
+	expCfg := config.EndorsementExperiment
+
+	defaultAgg, err := parseAggregationType(expCfg.DefaultAggregation)
+	if err != nil {
+		return nil, fmt.Errorf("parse default aggregation: %w", err)
+	}
+	strictAgg, err := parseAggregationType(expCfg.StrictAggregation)
+	if err != nil {
+		return nil, fmt.Errorf("parse strict aggregation: %w", err)
+	}
+
+	defaultPolicy, strictPolicy := buildDefaultEndorsementPolicies(
+		expCfg.DefaultThreshold,
+		expCfg.StrictThreshold,
+		defaultAgg,
+		strictAgg,
+	)
+
+	failAddr := common.HexToAddress(expCfg.FailToAddress)
+	rules := endorsementpolicy.BuildDefaultExperimentRules(failAddr, strictPolicy, defaultPolicy)
+
 	ruleResolver, err := endorsementpolicy.NewRuleBasedResolver(defaultPolicy, rules)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build rule-based endorsement resolver: %w", err)
 	}
 
 	policyConfig := &endorsementpolicy.PolicyConfig{
-		BlockEndorsementTimeout: 2 * time.Second,
-		MaxRebuildRounds:        3,
+		BlockEndorsementTimeout: expCfg.BlockEndorsementTimeout,
+		MaxRebuildRounds:        expCfg.MaxRebuildRounds,
 	}
 
-	// ========= endorsement policy / resolver / BLS 配置开始 =========
+	var (
+		mgr            *endorsement.DefaultEndorsementManager
+		blsPubRegistry *endorsement.InMemoryBLSPublicKeyRegistry
+	)
 
-	// 与原 mock client 保持一致的 reject 规则：
-	// 发送到 0x1111...1111 的交易，对 A/B/C 全部拒绝 -> 必失败
-	rejectRules := endorsement.EndorsementRejectRules{
-		RejectByToAndEndorser: map[common.Address]map[endorsementpolicy.EndorserID]bool{
-			common.HexToAddress("0x1111111111111111111111111111111111111111"): {
-				"A": true,
-				"B": true,
-				"C": true,
-			},
-		},
-		RejectByFromAndEndorser: nil,
-		RejectByEndorser:        nil,
-		RejectByTxIndex:         nil,
-		RejectByTxHash:          nil,
-	}
+	if expCfg.Enable && expCfg.Mode != "disabled" {
+		var client endorsement.EndorsementClient
 
-	// 初始化 BLS 私钥仓库与公钥注册表
-	blsKeyStore := endorsement.NewBLSSecretKeyStore()
-	blsPubRegistry := endorsement.NewInMemoryBLSPublicKeyRegistry()
+		switch expCfg.Mode {
+		case "local":
+			client = &endorsement.MockEndorsementClient{
+				Rules: endorsement.EndorsementRejectRules{
+					RejectByToAndEndorser: map[common.Address]map[endorsementpolicy.EndorserID]bool{
+						failAddr: {
+							"A": true,
+							"B": true,
+							"C": true,
+						},
+					},
+				},
+			}
 
-	// 固定 BLS 私钥配置。
-	// 注意：
-	// 1. 这里必须使用稳定不变的 key，不能每次启动随机生成。
-	// 2. 这些值应当替换成实际生成并固定保存的 BLS secret key hex。
-	// 3. 每个 EndorserID 必须长期绑定同一把 key，否则历史块无法持续验证。
-	blsSecretKeyHex := map[endorsementpolicy.EndorserID]string{
-		"A": "4a828dadf8374bd9dfc8e74b0f5c0e3e90e9760cf495b491502d2f784f634917",
-		"B": "3e0113bf243ee2409d37540d6007ad634cc4dfbab960d8808f373708bbcd25fe",
-		"C": "4b469620cf2e1ff647a7092d7a658c6dd5be85fa627ae2dea448f5c9c8ee27e1",
-	}
+		case "remote":
+			blsPubRegistry, err = buildBLSPublicKeyRegistryFromConfig(expCfg)
+			if err != nil {
+				return nil, err
+			}
 
-	for id, skHex := range blsSecretKeyHex {
-		if err := blsKeyStore.AddSecretKeyHex(id, skHex); err != nil {
-			return nil, fmt.Errorf("failed to load fixed BLS secret key for endorser %s: %w", id, err)
+			client = &endorsement.RemoteEndorsementClient{
+				Endpoints: map[endorsementpolicy.EndorserID]string{
+					"A": expCfg.EndorserAURL,
+					"B": expCfg.EndorserBURL,
+					"C": expCfg.EndorserCURL,
+				},
+				HTTPClient: &http.Client{
+					Timeout: expCfg.BlockEndorsementTimeout,
+				},
+			}
+
+		default:
+			return nil, fmt.Errorf("unknown endorsement mode: %s", expCfg.Mode)
 		}
 
-		pubBytes, err := blsKeyStore.GetPublicKeyBytes(id)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get BLS public key for endorser %s: %w", id, err)
+		var certBuilder endorsement.CertificateBuilder
+		if blsPubRegistry != nil {
+			certBuilder = &endorsement.DefaultCertificateBuilder{
+				BLSPublicKeys: blsPubRegistry,
+			}
+		} else {
+			certBuilder = &endorsement.DefaultCertificateBuilder{}
 		}
 
-		if err := blsPubRegistry.RegisterPublicKey(id, pubBytes); err != nil {
-			return nil, fmt.Errorf("failed to register BLS public key for endorser %s: %w", id, err)
+		mgr = &endorsement.DefaultEndorsementManager{
+			RequestBuilder: &endorsement.DefaultRequestBuilder{},
+			Client:         client,
+			Collector:      &endorsement.InMemoryResultCollector{},
+			CertificateBuilder: certBuilder,
+			RootBuilder:        &endorsement.DefaultRootBuilder{},
 		}
 	}
 
-	mgr := &endorsement.DefaultEndorsementManager{
-		RequestBuilder: &endorsement.DefaultRequestBuilder{},
-		Client: &endorsement.BLSEndorsementClient{
-			KeyStore: blsKeyStore,
-			Rules:    rejectRules,
-		},
-		Collector: &endorsement.InMemoryResultCollector{},
-		CertificateBuilder: &endorsement.DefaultCertificateBuilder{
-			BLSPublicKeys: blsPubRegistry,
-		},
-		RootBuilder: &endorsement.DefaultRootBuilder{},
+	if mgr != nil {
+		execEngine.SetCandidateBlockEndorser(mgr)
+		execEngine.SetPolicyConfig(policyConfig)
+		if blsPubRegistry != nil {
+			execEngine.SetCommitmentVerifierBLSPublicKeys(blsPubRegistry)
+		}
+	} else {
+		log.Info("ENDORSEMENT_EXPERIMENT_DISABLED",
+			"enable", expCfg.Enable,
+			"mode", expCfg.Mode,
+		)
 	}
-	// ========= endorsement policy / resolver / BLS 配置结束 =========
-
-
-	execEngine.SetCandidateBlockEndorser(mgr)
-	execEngine.SetPolicyConfig(policyConfig)
-	execEngine.SetCommitmentVerifierBLSPublicKeys(blsPubRegistry)
 
 	if config.EnablePrefetchBlock {
 		execEngine.EnablePrefetchBlock()
@@ -391,11 +545,11 @@ func CreateExecutionNode(
 			return nil, err
 		}
 
-		// 用 RuleBasedResolver 替换 StaticResolver
 		sequencer.SetPolicyResolver(ruleResolver)
 
-		// 用统一 policyConfig，避免 sequencer / execution engine 配置分叉
-		sequencer.SetPolicyConfig(policyConfig)
+		if mgr != nil {
+			sequencer.SetPolicyConfig(policyConfig)
+		}
 
 		txPublisher = sequencer
 	} else {
@@ -433,8 +587,8 @@ func CreateExecutionNode(
 	if l2BlockChain.Config().ArbitrumChainParams.GenesisBlockNum > 0 {
 		classicMsgDB, err := stack.OpenDatabaseWithOptions("classic-msg", node.DatabaseOptions{
 			MetricsNamespace: "classicmsg/",
-			Cache:            0, // will be sanitized to minimum
-			Handles:          0, // will be sanitized to minimum
+			Cache:            0,
+			Handles:          0,
 			ReadOnly:         true,
 			NoFreezer:        true,
 		})
@@ -532,7 +686,6 @@ func CreateExecutionNode(
 	stack.RegisterAPIs(apis)
 
 	return execNode, nil
-
 }
 
 func (n *ExecutionNode) MarkFeedStart(to arbutil.MessageIndex) containers.PromiseInterface[struct{}] {
@@ -808,7 +961,27 @@ func (n *ExecutionNode) InitializeTimeboost(ctx context.Context, chainConfig *pa
 
 // new
 
-func buildDefaultEndorsementPolicies() (
+func parseAggregationType(s string) (endorsementpolicy.AggregationType, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "bls":
+		return endorsementpolicy.AggregationBLS, nil
+	case "individual":
+		return endorsementpolicy.AggregationIndividualSignatures, nil
+	case "bitmap":
+		return endorsementpolicy.AggregationBitmapSignatures, nil
+	case "commitment-only":
+		return endorsementpolicy.AggregationCommitmentOnly, nil
+	default:
+		return 0, fmt.Errorf("unknown aggregation type %q", s)
+	}
+}
+
+func buildDefaultEndorsementPolicies(
+	defaultThreshold uint32,
+	strictThreshold uint32,
+	defaultAgg endorsementpolicy.AggregationType,
+	strictAgg endorsementpolicy.AggregationType,
+) (
 	defaultPolicy *endorsementpolicy.EndorsementPolicy,
 	strictPolicy *endorsementpolicy.EndorsementPolicy,
 ) {
@@ -821,9 +994,9 @@ func buildDefaultEndorsementPolicies() (
 				{ID: "C"},
 			},
 		},
-		Threshold:       2,
+		Threshold:       defaultThreshold,
 		FailMode:        endorsementpolicy.EndorsementFailDropTxAndRebuild,
-		AggregationType: endorsementpolicy.AggregationIndividualSignatures,
+		AggregationType: defaultAgg,
 	}
 
 	strictPolicy = &endorsementpolicy.EndorsementPolicy{
@@ -835,10 +1008,33 @@ func buildDefaultEndorsementPolicies() (
 				{ID: "C"},
 			},
 		},
-		Threshold:       3,
+		Threshold:       strictThreshold,
 		FailMode:        endorsementpolicy.EndorsementFailDropTxAndRebuild,
-		AggregationType: endorsementpolicy.AggregationIndividualSignatures,
+		AggregationType: strictAgg,
 	}
 
 	return defaultPolicy, strictPolicy
+}
+
+func buildBLSPublicKeyRegistryFromConfig(
+	cfg EndorsementExperimentConfig,
+) (*endorsement.InMemoryBLSPublicKeyRegistry, error) {
+	reg := endorsement.NewInMemoryBLSPublicKeyRegistry()
+
+	pubkeys := map[endorsementpolicy.EndorserID]string{
+		"A": cfg.EndorserAPubKeyHex,
+		"B": cfg.EndorserBPubKeyHex,
+		"C": cfg.EndorserCPubKeyHex,
+	}
+
+	for id, pubHex := range pubkeys {
+		pubBytes, err := hex.DecodeString(strings.TrimSpace(pubHex))
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode BLS public key hex for endorser %s: %w", id, err)
+		}
+		if err := reg.RegisterPublicKey(id, pubBytes); err != nil {
+			return nil, fmt.Errorf("failed to register BLS public key for endorser %s: %w", id, err)
+		}
+	}
+	return reg, nil
 }
