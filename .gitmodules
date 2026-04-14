@@ -19,7 +19,7 @@
 	url = https://github.com/OffchainLabs/wasmer.git
 [submodule "nitro-testnode"]
 	path = nitro-testnode
-	url = https://github.com/OffchainLabs/nitro-testnode.git
+	url = git@github.com:SuzumiyaHaruki/endorsement-testnode.git
 [submodule "crates/langs/rust"]
 	path = crates/langs/rust
 	url = https://github.com/OffchainLabs/stylus-sdk-rs.git
