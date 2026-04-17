@@ -60,11 +60,15 @@ func main() {
 		Rules:    rules,
 	}
 
-	handler := endorsement.NewHTTPEndorserHandler(&endorsement.HTTPEndorserServer{
+	handler, err := endorsement.NewHTTPEndorserHandler(&endorsement.HTTPEndorserServer{
 		EndorserID: id,
 		Signer:     signer,
 		PublicKey:  pubBytes,
 	})
+	if err != nil {
+		panic(fmt.Errorf("create endorser handler: %w", err))
+	}
+
 
 	srv := &http.Server{
 		Addr:              *listenAddr,

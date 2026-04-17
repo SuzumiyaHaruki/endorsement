@@ -56,7 +56,7 @@ import (
 	"github.com/offchainlabs/nitro/util/sharedmetrics"
 	"github.com/offchainlabs/nitro/util/stopwaiter"
 
-	// new
+	// 背书相关
 	"github.com/offchainlabs/nitro/endorsementpolicy"
 	"github.com/offchainlabs/nitro/endorsement"
 	"encoding/json"
@@ -82,9 +82,8 @@ var (
 	BlockNumBeforeGenesis               = errors.New("block number is before genesis")
 )
 
-// ErrFilteredDelayedMessage is returned when a delayed message contains transactions
-// that touch filtered addresses. The sequencer should halt and wait for the tx hashes
-// to be added to the onchain filter before retrying.
+// ErrFilteredDelayedMessage 表示延迟消息中包含触达受过滤地址的交易。
+// Sequencer 应暂停处理，并等待这些交易哈希被加入链上过滤器后再重试。
 type ErrFilteredDelayedMessage struct {
 	TxHashes      []common.Hash
 	DelayedMsgIdx uint64
@@ -95,14 +94,13 @@ func (e *ErrFilteredDelayedMessage) Error() string {
 		e.DelayedMsgIdx, len(e.TxHashes), e.TxHashes)
 }
 
-// ErrDelayedTxFiltered is an internal error used during block production to signal
-// that a transaction touched a filtered address and is not in the onchain filter.
+// ErrDelayedTxFiltered 是出块过程中使用的内部错误，
+// 用于表示某笔交易触达了受过滤地址且不在链上过滤器中。
 var ErrDelayedTxFiltered = errors.New("delayed transaction filtered")
 
-// DelayedFilteringSequencingHooks extends NoopSequencingHooks with address filtering
-// for delayed message processing. Collects all tx hashes that touch filtered addresses
-// and are not in the onchain filter. After block production, the caller checks if any
-// hashes were collected and returns ErrFilteredDelayedMessage if so.
+// DelayedFilteringSequencingHooks 在 NoopSequencingHooks 基础上增加了地址过滤能力，
+// 用于处理延迟消息。它会收集所有触达受过滤地址且不在链上过滤器中的交易哈希。
+// 出块结束后，调用方会检查是否收集到了这些哈希，若有则返回 ErrFilteredDelayedMessage。
 type DelayedFilteringSequencingHooks struct {
 	arbos.NoopSequencingHooks
 	FilteredTxHashes []common.Hash
@@ -116,18 +114,17 @@ func NewDelayedFilteringSequencingHooks(txes types.Transactions, ef *eventfilter
 	}
 }
 
-// PostTxFilter touches To/From addresses and checks IsAddressFiltered.
-// Collects tx hashes that touch filtered addresses but are not in the onchain filter.
-// Does not return an error - the caller checks FilteredTxHashes after block production.
+// PostTxFilter 会触达交易的 To/From 地址并检查 IsAddressFiltered。
+// 它会收集触达受过滤地址但不在链上过滤器中的交易哈希。
+// 该方法本身不返回错误，调用方会在出块后检查 FilteredTxHashes。
 func (f *DelayedFilteringSequencingHooks) PostTxFilter(header *types.Header, db *state.StateDB, a *arbosState.ArbosState, tx *types.Transaction, sender common.Address, dataGas uint64, result *core.ExecutionResult) error {
 	db.TouchAddress(sender)
 	if tx.To() != nil {
 		db.TouchAddress(*tx.To())
 	}
-	// For tx types that alias the sender (unsigned contract txs, retryables),
-	// also check the original L1 address. The sender in the tx is already
-	// aliased by the L1 bridge, but the restricted address list contains
-	// original (non-aliased) addresses.
+	// 对于会对发送者地址做别名映射的交易类型（如无签名合约交易、retryable），
+	// 还需要检查原始的 L1 地址。交易里的 sender 已经被 L1 bridge 做过别名映射，
+	// 但受限地址列表里保存的是原始地址，而不是映射后的地址。
 	txType := tx.Type()
 	if arbosutil.DoesTxTypeAlias(&txType) {
 		db.TouchAddress(arbosutil.InverseRemapL1Address(sender))
@@ -136,14 +133,14 @@ func (f *DelayedFilteringSequencingHooks) PostTxFilter(header *types.Header, db 
 	applyEventFilter(f.eventFilter, db)
 
 	if db.IsAddressFiltered() {
-		// If the STF already handled this tx via the onchain filter mechanism,
-		// the filter entry has been cleaned up and we're done.
+		// 如果状态转换流程已经通过链上过滤机制处理了这笔交易，
+		// 那么对应过滤条目已经被清理，此处无需再处理。
 		var filteredErr *core.ErrFilteredTx
 		if errors.As(result.Err, &filteredErr) {
 			return nil
 		}
-		// Otherwise, this tx touched a filtered address but wasn't in the
-		// onchain filter - collect it so the caller can halt.
+		// 否则说明这笔交易触达了受过滤地址，但并不在链上过滤器中，
+		// 需要收集下来，以便调用方中止流程。
 		f.FilteredTxHashes = append(f.FilteredTxHashes, tx.Hash())
 	}
 	return nil
@@ -161,10 +158,9 @@ func applyEventFilter(ef *eventfilter.EventFilter, db *state.StateDB) {
 	}
 }
 
-// touchRetryableAddresses touches addresses from retryable inner fields
-// (Beneficiary, FeeRefundAddr, RetryTo) so the address filter can detect them.
-// Also touches de-aliased versions to catch L1 contract addresses that were
-// aliased by the Inbox contract.
+// touchRetryableAddresses 会触达 retryable 内部字段中的地址
+// （Beneficiary、FeeRefundAddr、RetryTo），以便地址过滤器能够检测到它们。
+// 同时也会触达去别名后的地址，以捕获被 Inbox 合约做过别名映射的 L1 合约地址。
 func touchRetryableAddresses(db *state.StateDB, tx *types.Transaction) {
 	if inner, ok := tx.GetInner().(*types.ArbitrumSubmitRetryableTx); ok {
 		db.TouchAddress(inner.Beneficiary)
@@ -189,6 +185,8 @@ type L1PriceData struct {
 	msgToL1PriceData        []L1PriceDataOfMsg
 }
 
+// ExecutionEngine 负责驱动 L2 消息执行、区块生成、链重组处理，
+// 以及交易过滤、区块背书等辅助校验流程。
 type ExecutionEngine struct {
 	stopwaiter.StopWaiter
 
@@ -204,7 +202,7 @@ type ExecutionEngine struct {
 	latestBlockMutex    sync.Mutex
 	latestBlock         *types.Block
 
-	nextScheduledVersionCheck time.Time // protected by the createBlocksMutex
+	nextScheduledVersionCheck time.Time // 受 createBlocksMutex 保护
 
 	reorgSequencing bool
 
@@ -226,13 +224,14 @@ type ExecutionEngine struct {
 	eventFilter                  *eventfilter.EventFilter
 	transactionFiltererRPCClient *TransactionFiltererRPCClient
 
-	// new
+	// 背书相关
 	candidateBlockEndorser  endorsement.EndorsementManager
 	policyConfig           *endorsementpolicy.PolicyConfig
-	// 用于从 metadata 反解析 commitment data 后做 BLS 验签
+	// 用于从元数据中反解析 commitment data 后执行 BLS 验签
 	commitmentVerifierBLSPublicKeys endorsement.BLSPublicKeyRegistry
 }
 
+// NewL1PriceData 创建一个按消息缓存 L1 定价数据的空缓存。
 func NewL1PriceData() *L1PriceData {
 	return &L1PriceData{
 		msgToL1PriceData: []L1PriceDataOfMsg{},
@@ -246,6 +245,7 @@ func init() {
 	}
 }
 
+// NewExecutionEngine 基于给定区块链构造一个执行引擎实例。
 func NewExecutionEngine(bc *core.BlockChain, syncTillBlock uint64, exposeMultiGas bool) *ExecutionEngine {
 	return &ExecutionEngine{
 		bc:                bc,
@@ -270,6 +270,7 @@ func (s *ExecutionEngine) backlogCallDataUnits() uint64 {
 		s.cachedL1PriceData.msgToL1PriceData[0].callDataUnits)
 }
 
+// MarkFeedStart 将 L1 定价缓存裁剪到给定消息索引之后。
 func (s *ExecutionEngine) MarkFeedStart(to arbutil.MessageIndex) {
 	s.cachedL1PriceData.mutex.Lock()
 	defer s.cachedL1PriceData.mutex.Unlock()
@@ -287,6 +288,7 @@ func (s *ExecutionEngine) MarkFeedStart(to arbutil.MessageIndex) {
 	}
 }
 
+// PopulateStylusTargetCache 为启用的目标架构配置本地 Stylus 程序缓存。
 func PopulateStylusTargetCache(targetConfig *StylusTargetConfig) error {
 	localTarget := rawdb.LocalTarget()
 	targets := targetConfig.WasmTargets()
@@ -295,7 +297,7 @@ func PopulateStylusTargetCache(targetConfig *StylusTargetConfig) error {
 		var effectiveStylusTarget string
 		switch target {
 		case rawdb.TargetWavm:
-			// skip wavm target
+			// 跳过 wavm 目标
 			continue
 		case rawdb.TargetArm64:
 			effectiveStylusTarget = targetConfig.Arm64
@@ -319,6 +321,7 @@ func PopulateStylusTargetCache(targetConfig *StylusTargetConfig) error {
 	return nil
 }
 
+// Initialize 初始化执行引擎使用的 Stylus 执行状态和相关缓存。
 func (s *ExecutionEngine) Initialize(rustCacheCapacityMB uint32, targetConfig *StylusTargetConfig) error {
 	if rustCacheCapacityMB != 0 {
 		programs.SetWasmLruCacheCapacity(arbmath.SaturatingUMul(uint64(rustCacheCapacityMB), 1024*1024))
@@ -330,6 +333,7 @@ func (s *ExecutionEngine) Initialize(rustCacheCapacityMB uint32, targetConfig *S
 	return nil
 }
 
+// SetRecorder 在执行引擎启动前安装可选的区块记录器。
 func (s *ExecutionEngine) SetRecorder(recorder *BlockRecorder) {
 	if s.Started() {
 		panic("trying to set recorder after start")
@@ -340,6 +344,7 @@ func (s *ExecutionEngine) SetRecorder(recorder *BlockRecorder) {
 	s.recorder = recorder
 }
 
+// SetReorgEventsNotifier 设置一个在发生重组事件时接收通知的通道。
 func (s *ExecutionEngine) SetReorgEventsNotifier(reorgEventsNotifier chan struct{}) {
 	if s.Started() {
 		panic("trying to set reorg events notifier after start")
@@ -350,6 +355,7 @@ func (s *ExecutionEngine) SetReorgEventsNotifier(reorgEventsNotifier chan struct
 	s.reorgEventsNotifier = reorgEventsNotifier
 }
 
+// EnableReorgSequencing 启用链重组后的交易重新排序流程。
 func (s *ExecutionEngine) EnableReorgSequencing() {
 	if s.Started() {
 		panic("trying to enable reorg sequencing after start")
@@ -360,6 +366,7 @@ func (s *ExecutionEngine) EnableReorgSequencing() {
 	s.reorgSequencing = true
 }
 
+// DisableStylusCacheMetricsCollection 关闭 Stylus 缓存指标采集。
 func (s *ExecutionEngine) DisableStylusCacheMetricsCollection() {
 	if s.Started() {
 		panic("trying to disable stylus cache metrics collection after start")
@@ -370,6 +377,7 @@ func (s *ExecutionEngine) DisableStylusCacheMetricsCollection() {
 	s.disableStylusCacheMetricsCollection = true
 }
 
+// EnablePrefetchBlock 启用在 DigestMessage 时构建预取区块。
 func (s *ExecutionEngine) EnablePrefetchBlock() {
 	if s.Started() {
 		panic("trying to enable prefetch block after start")
@@ -380,6 +388,7 @@ func (s *ExecutionEngine) EnablePrefetchBlock() {
 	s.prefetchBlock = true
 }
 
+// SetConsensus 设置用于获取元数据和批次访问能力的共识客户端。
 func (s *ExecutionEngine) SetConsensus(consensus consensus.FullConsensusClient) {
 	if s.Started() {
 		panic("trying to set transaction consensus after start")
@@ -390,6 +399,7 @@ func (s *ExecutionEngine) SetConsensus(consensus consensus.FullConsensusClient) 
 	s.consensus = consensus
 }
 
+// BlockMetadataAtMessageIndex 返回共识层提供的指定消息对应区块元数据。
 func (s *ExecutionEngine) BlockMetadataAtMessageIndex(ctx context.Context, msgIdx arbutil.MessageIndex) (common.BlockMetadata, error) {
 	if s.consensus != nil {
 		return s.consensus.BlockMetadataAtMessageIndex(msgIdx).Await(ctx)
@@ -397,10 +407,12 @@ func (s *ExecutionEngine) BlockMetadataAtMessageIndex(ctx context.Context, msgId
 	return nil, errors.New("FullConsensusClient is not accessible to execution")
 }
 
+// GetBatchFetcher 返回执行引擎当前使用的批次获取器。
 func (s *ExecutionEngine) GetBatchFetcher() consensus.BatchFetcher {
 	return s.consensus
 }
 
+// Reorg 将链回滚到指定消息索引处，并应用新的替换消息。
 func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newMessages []arbostypes.MessageWithMetadataAndBlockInfo, oldMessages []*arbostypes.MessageWithMetadata) ([]*execution.MessageResult, error) {
 	if msgIdxOfFirstMsgToAdd == 0 {
 		return nil, errors.New("cannot reorg out genesis")
@@ -409,14 +421,14 @@ func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newM
 	s.createBlocksMutex.Lock()
 	resequencing := false
 	defer func() {
-		// if we are resequencing old messages - don't release the lock
-		// lock will be released by thread listening to resequenceChan
+		// 如果正在对旧消息重新排序，就不要在这里释放锁，
+		// 锁会由监听 resequenceChan 的线程释放。
 		if !resequencing {
 			s.createBlocksMutex.Unlock()
 		}
 	}()
 	lastBlockNumToKeep := s.MessageIndexToBlockNumber(msgIdxOfFirstMsgToAdd - 1)
-	// We can safely cast lastBlockNumToKeep to a uint64 as it comes from MessageIndexToBlockNumber
+	// lastBlockNumToKeep 来自 MessageIndexToBlockNumber，因此可以安全转换为 uint64。
 	lastBlockToKeep := s.bc.GetBlockByNumber(uint64(lastBlockNumToKeep))
 	if lastBlockToKeep == nil {
 		log.Warn("reorg target block not found", "block", lastBlockNumToKeep)
@@ -435,7 +447,7 @@ func (s *ExecutionEngine) Reorg(msgIdxOfFirstMsgToAdd arbutil.MessageIndex, newM
 	}
 
 	tag := core.NewMessageCommitContext(nil).WasmCacheTag() // we don't pass any targets, we just want the tag
-	// reorg Rust-side VM state
+	// 重组 Rust 侧的 VM 状态
 	C.stylus_reorg_vm(C.uint64_t(lastBlockNumToKeep), C.uint32_t(tag))
 
 	err := s.bc.ReorgToOldBlock(lastBlockToKeep)
@@ -481,6 +493,7 @@ func (s *ExecutionEngine) getCurrentHeader() (*types.Header, error) {
 	return currentBlock, nil
 }
 
+// HeadMessageIndex 返回当前头区块对应的消息索引。
 func (s *ExecutionEngine) HeadMessageIndex() (arbutil.MessageIndex, error) {
 	currentHeader, err := s.getCurrentHeader()
 	if err != nil {
@@ -489,12 +502,14 @@ func (s *ExecutionEngine) HeadMessageIndex() (arbutil.MessageIndex, error) {
 	return s.BlockNumberToMessageIndex(currentHeader.Number.Uint64())
 }
 
+// HeadMessageIndexSync 是测试辅助函数，会在持有出块锁时读取头消息索引。
 func (s *ExecutionEngine) HeadMessageIndexSync(t *testing.T) (arbutil.MessageIndex, error) {
 	s.createBlocksMutex.Lock()
 	defer s.createBlocksMutex.Unlock()
 	return s.HeadMessageIndex()
 }
 
+// NextDelayedMessageNumber 返回下一个延迟消息区块期望使用的延迟消息索引。
 func (s *ExecutionEngine) NextDelayedMessageNumber() (uint64, error) {
 	currentHeader, err := s.getCurrentHeader()
 	if err != nil {
@@ -503,7 +518,7 @@ func (s *ExecutionEngine) NextDelayedMessageNumber() (uint64, error) {
 	return currentHeader.Nonce.Uint64(), nil
 }
 
-// The caller must hold the createBlocksMutex
+// 调用方必须持有 createBlocksMutex。
 func (s *ExecutionEngine) resequenceReorgedMessages(messages []*arbostypes.MessageWithMetadata) {
 	if !s.reorgSequencing {
 		return
@@ -519,7 +534,7 @@ func (s *ExecutionEngine) resequenceReorgedMessages(messages []*arbostypes.Messa
 	nextDelayedMsgIdx := lastBlockHeader.Nonce.Uint64()
 
 	for _, msg := range messages {
-		// Check if the message is non-nil just to be safe
+		// 出于稳妥考虑，先检查消息是否为 nil。
 		if msg == nil || msg.Message == nil || msg.Message.Header == nil {
 			continue
 		}
@@ -538,7 +553,7 @@ func (s *ExecutionEngine) resequenceReorgedMessages(messages []*arbostypes.Messa
 			continue
 		}
 		if header.Kind != arbostypes.L1MessageType_L2Message || header.Poster != l1pricing.BatchPosterAddress {
-			// This shouldn't exist?
+			// 这种消息理论上不应该出现。
 			log.Warn("skipping non-standard sequencer message found from reorg", "header", header)
 			continue
 		}
@@ -571,18 +586,18 @@ func (s *ExecutionEngine) sequencerWrapper(sequencerFunc func() (*types.Block, e
 		if !errors.Is(err, execution.ErrSequencerInsertLockTaken) {
 			return block, err
 		}
-		// We got SequencerInsertLockTaken
-		// option 1: there was a race, we are no longer main sequencer
+		// 遇到了 SequencerInsertLockTaken。
+		// 情况 1：发生了竞争，我们已经不是主 sequencer 了。
 		_, chosenErr := s.consensus.ExpectChosenSequencer().Await(s.GetContext())
 		if chosenErr != nil {
 			return nil, chosenErr
 		}
-		// option 2: we are in a test without very orderly sequencer coordination
+		// 情况 2：当前处于测试环境，sequencer 协调不够严格。
 		if !s.bc.Config().ArbitrumChainParams.AllowDebugPrecompiles {
-			// option 3: something weird. send warning
+			// 情况 3：出现了异常情况，打印警告。
 			log.Warn("sequence transactions: insert lock takent", "attempts", attempts)
 		}
-		// options 2/3 fail after too many attempts
+		// 情况 2/3 在重试过多次后也会失败。
 		attempts++
 		if attempts > 20 {
 			return nil, err
@@ -591,15 +606,15 @@ func (s *ExecutionEngine) sequencerWrapper(sequencerFunc func() (*types.Block, e
 	}
 }
 
+// SequenceTransactions 将 hooks 提供的交易打包并执行为下一个区块。
 func (s *ExecutionEngine) SequenceTransactions(header *arbostypes.L1IncomingMessageHeader, hooks *FullSequencingHooks, timeboostedTxs map[common.Hash]struct{}) (*types.Block, error) {
 	return s.sequencerWrapper(func() (*types.Block, error) {
 		return s.sequenceTransactionsWithBlockMutex(header, hooks, timeboostedTxs)
 	})
 }
 
-// SequenceTransactionsWithProfiling runs SequenceTransactions with tracing and
-// CPU profiling enabled. If the block creation takes longer than 2 seconds, it
-// keeps both and prints out filenames in an error log line.
+// SequenceTransactionsWithProfiling 在启用跟踪和 CPU 性能分析的情况下执行 SequenceTransactions。
+// 如果出块耗时超过 2 秒，会保留对应的分析文件并在日志中输出文件名。
 func (s *ExecutionEngine) SequenceTransactionsWithProfiling(header *arbostypes.L1IncomingMessageHeader, hooks *FullSequencingHooks, timeboostedTxs map[common.Hash]struct{}) (*types.Block, error) {
 	pprofBuf, traceBuf := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 	if err := pprof.StartCPUProfile(pprofBuf); err != nil {
@@ -802,8 +817,8 @@ func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.
 		return nil, err
 	}
 
-	// Only write the block after we've written the messages, so if the node dies in the middle of this,
-	// it will naturally recover on startup by regenerating the missing block.
+	// 只有在消息写入完成后才写区块，这样如果节点在中途退出，
+	// 启动时就能通过重新生成缺失区块来自然恢复。
 	err = s.appendBlock(block, statedb, receipts, blockCalcTime)
 	if err != nil {
 		return nil, err
@@ -814,7 +829,7 @@ func (s *ExecutionEngine) sequenceTransactionsWithBlockMutex(header *arbostypes.
 }
 
 
-// new
+// 区块元数据版本定义
 const (
 	blockMetadataVersionTimeboostOnly   byte = 0
 	blockMetadataVersionWithEndorsement byte = 1
@@ -825,7 +840,7 @@ const (
 	blockMetadataFlagEndorsement byte = 1 << 1
 )
 
-// 只生成 timeboost payload
+// buildTimeboostMetadataPayload 仅生成 timeboost 负载内容。
 func (s *ExecutionEngine) buildTimeboostMetadataPayload(
 	block *types.Block,
 	timeboostedTxs map[common.Hash]struct{},
@@ -834,7 +849,7 @@ func (s *ExecutionEngine) buildTimeboostMetadataPayload(
 		return nil
 	}
 
-	// 这里只生成纯 payload，不再在第一个字节放 version
+	// 这里只生成纯负载，不再在第一个字节写入版本号。
 	bits := make([]byte, arbmath.DivCeil(uint64(len(block.Transactions())), 8))
 	if len(timeboostedTxs) == 0 {
 		return bits
@@ -853,21 +868,22 @@ func (s *ExecutionEngine) blockMetadataFromDecision(
 	timeboostedTxs map[common.Hash]struct{},
 	decision *endorsement.BlockProcessingDecision,
 ) common.BlockMetadata {
-	// 只要区块里有交易，哪怕没有任何一笔 timeboosted，hasTimeboost 也可能是 true
-	// 因为 payload 里虽然全是 0，但长度不为 0
-	// hasTimeboost 现在实际上表示的是：是否有 timeboost payload 段，不是“是否存在至少一笔 timeboosted 交易”
+	// 只要区块里有交易，哪怕没有任何一笔交易经过 timeboost，hasTimeboost 也可能为 true，
+	// 因为负载内容即使全为 0，长度也仍然大于 0。
+	// 所以 hasTimeboost 现在实际表示的是“是否存在 timeboost 负载段”，
+	// 而不是“是否至少存在一笔经过 timeboost 的交易”。
 	timeboostPayload := s.buildTimeboostMetadataPayload(block, timeboostedTxs)
 
 	hasTimeboost := len(timeboostPayload) > 0
-	// 只有 CommitmentRoot 和 CommitmentData 都非空，才会走 version 1
-	// 未来需要考虑是否存在只有 CommitmentRoot 没有 CommitmentData 的情况
+	// 只有 CommitmentRoot 和 CommitmentData 都非空时，才会走版本 1。
+	// 未来需要考虑是否存在只有 CommitmentRoot 而没有 CommitmentData 的情况。
 	hasEndorsement := decision != nil &&
 		decision.AllSatisfied &&
 		decision.CommitmentRoot != (common.Hash{}) &&
 		len(decision.CommitmentData) > 0
 
-	// 如果没有 endorsement 信息，就保持旧格式（version 0）返回，
-	// 避免影响现有依赖旧 metadata 格式的路径。
+	// 如果没有背书信息，就保持旧格式（版本 0）返回，
+	// 避免影响现有依赖旧 metadata 格式的处理路径。
 	if !hasEndorsement {
 		bits := make(common.BlockMetadata, 1+len(timeboostPayload))
 		bits[0] = blockMetadataVersionTimeboostOnly
@@ -889,6 +905,7 @@ func (s *ExecutionEngine) blockMetadataFromDecision(
 		flags |= blockMetadataFlagEndorsement
 	}
 
+	// 结构为：
 	// version(1) + flags(1) +
 	// timeboostLen(4) + timeboostPayload +
 	// commitmentRoot(32) +
@@ -918,11 +935,11 @@ func (s *ExecutionEngine) blockMetadataFromDecision(
 	return out
 }
 
-// blockMetadataFromBlock returns timeboosted byte array which says whether a transaction in the block was timeboosted
-// or not. The first byte of blockMetadata byte array is reserved to indicate the version,
-// starting from the second byte, (N)th bit would represent if (N)th tx is timeboosted or not, 1 means yes and 0 means no
-// blockMetadata[index / 8 + 1] & (1 << (index % 8)) != 0; where index = (N - 1), implies whether (N)th tx in a block is timeboosted
-// note that number of txs in a block will always lag behind (len(blockMetadata) - 1) * 8 but it won't lag more than a value of 7
+// blockMetadataFromBlock 返回一个 timeboost 位图字节数组，用于表示区块中的交易是否经过 timeboost。
+// blockMetadata 的第一个字节保留为版本号。
+// 从第二个字节开始，第 N 笔交易对应第 N-1 个 bit，1 表示是，0 表示否。
+// 可通过 blockMetadata[index / 8 + 1] & (1 << (index % 8)) != 0 判断，其中 index = N - 1。
+// 注意，区块中的交易数通常会小于 (len(blockMetadata) - 1) * 8，但最多只会少 7。
 func (s *ExecutionEngine) blockMetadataFromBlock(block *types.Block, timeboostedTxs map[common.Hash]struct{}) common.BlockMetadata {
 	// bits := make(common.BlockMetadata, 1+arbmath.DivCeil(uint64(len(block.Transactions())), 8))
 	// if len(timeboostedTxs) == 0 {
@@ -937,6 +954,7 @@ func (s *ExecutionEngine) blockMetadataFromBlock(block *types.Block, timeboosted
 	return s.blockMetadataFromDecision(block, timeboostedTxs, nil)
 }
 
+// SequenceDelayedMessage 执行一条延迟收件箱消息并追加生成的区块。
 func (s *ExecutionEngine) SequenceDelayedMessage(message *arbostypes.L1IncomingMessage, delayedMsgIdx uint64) error {
 	_, err := s.sequencerWrapper(func() (*types.Block, error) {
 		return s.sequenceDelayedMessageWithBlockMutex(message, delayedMsgIdx)
@@ -998,10 +1016,12 @@ func (s *ExecutionEngine) sequenceDelayedMessageWithBlockMutex(message *arbostyp
 	return block, nil
 }
 
+// GetGenesisBlockNumber 返回配置中的 L2 创世区块号。
 func (s *ExecutionEngine) GetGenesisBlockNumber() uint64 {
 	return s.bc.Config().ArbitrumChainParams.GenesisBlockNum
 }
 
+// BlockNumberToMessageIndex 将 L2 区块号映射为对应的消息索引。
 func (s *ExecutionEngine) BlockNumberToMessageIndex(blockNum uint64) (arbutil.MessageIndex, error) {
 	genesis := s.GetGenesisBlockNumber()
 	if blockNum < genesis {
@@ -1010,11 +1030,12 @@ func (s *ExecutionEngine) BlockNumberToMessageIndex(blockNum uint64) (arbutil.Me
 	return arbutil.MessageIndex(blockNum - genesis), nil
 }
 
+// MessageIndexToBlockNumber 将消息索引映射为其生成的区块号。
 func (s *ExecutionEngine) MessageIndexToBlockNumber(msgIdx arbutil.MessageIndex) uint64 {
 	return uint64(msgIdx) + s.GetGenesisBlockNumber()
 }
 
-// must hold createBlockMutex
+// 调用方必须持有 createBlockMutex。
 func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWithMetadata, isMsgForPrefetch bool, applyDelayedFilter bool) (*types.Block, *state.StateDB, types.Receipts, error) {
 	currentHeader := s.bc.CurrentBlock()
 	if currentHeader == nil {
@@ -1036,7 +1057,7 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 		return nil, nil, nil, err
 	}
 
-	// Set up address checker for filtering if configured
+	// 如果配置了地址检查器，则在这里挂载用于过滤。
 	if s.addressChecker != nil {
 		statedb.SetAddressChecker(s.addressChecker)
 	}
@@ -1062,10 +1083,10 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 		runCtx = core.NewMessageCommitContext(s.wasmTargets)
 	}
 
-	// For delayed message sequencing, we use DelayedFilteringSequencingHooks which can
-	// halt on filtered addresses. This duplicates logic from arbos.ProduceBlock but with
-	// different hooks, and we need access to filteringHooks.FilteredTxHash to report
-	// which tx caused the halt.
+	// 对于延迟消息排序，使用支持过滤的 DelayedFilteringSequencingHooks，
+	// 它可以在命中过滤地址时中止流程。这里复用了 arbos.ProduceBlock 的整体逻辑，
+	// 但使用了不同的 hooks，因为我们需要访问 filteringHooks.FilteredTxHash，
+	// 以便上报是哪笔交易触发了中止。
 	if applyDelayedFilter {
 		chainConfig := s.bc.Config()
 		currentArbosVersion := types.DeserializeHeaderExtraInformation(currentHeader).ArbOSFormatVersion
@@ -1090,13 +1111,13 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		// Check if any txs touched filtered addresses but are not in the onchain filter
+		// 检查是否有交易触达了受过滤地址，但尚未进入链上过滤器。
 		if len(filteringHooks.FilteredTxHashes) > 0 {
 			if s.transactionFiltererRPCClient != nil {
 				s.LaunchThread(func(ctx context.Context) {
-					// Call transaction-filterer sequentially.
-					// To avoid nonce collisions when adding a tx to ArbFilteredTransactionsManager,
-					// transaction-filterer will process only one Filter call at a time.
+					// 顺序调用 transaction-filterer。
+					// 为避免向 ArbFilteredTransactionsManager 添加交易时发生 nonce 冲突，
+					// transaction-filterer 一次只会处理一个 Filter 调用。
 					for _, filteredTxHash := range filteringHooks.FilteredTxHashes {
 						_, err := s.transactionFiltererRPCClient.Filter(filteredTxHash).Await(ctx)
 						if err != nil {
@@ -1128,7 +1149,7 @@ func (s *ExecutionEngine) createBlockFromNextMessage(msg *arbostypes.MessageWith
 	return block, statedb, receipts, err
 }
 
-// must hold createBlockMutex
+// 调用方必须持有 createBlockMutex。
 func (s *ExecutionEngine) appendBlock(block *types.Block, statedb *state.StateDB, receipts types.Receipts, duration time.Duration) error {
 	var logs []*types.Log
 	for _, receipt := range receipts {
@@ -1136,8 +1157,8 @@ func (s *ExecutionEngine) appendBlock(block *types.Block, statedb *state.StateDB
 	}
 	startTime := time.Now()
 	if s.bc.GetVMConfig().Tracer != nil {
-		// InsertChain is basically WriteBlockAndSetHeadWithTime along with recomputing
-		// the entire block which is also traced which works directly for live-tracing
+		// InsertChain 基本等价于 WriteBlockAndSetHeadWithTime 再重新计算整个区块，
+		// 同时整个过程也会被 tracing 捕获，因此适合直接用于在线问题定位。
 		if _, err := s.bc.InsertChain([]*types.Block{block}); err != nil {
 			return err
 		}
@@ -1187,6 +1208,7 @@ func (s *ExecutionEngine) resultFromHeader(header *types.Header) (*execution.Mes
 	}, nil
 }
 
+// ResultAtMessageIndex 返回指定消息索引对应的已保存执行结果。
 func (s *ExecutionEngine) ResultAtMessageIndex(msgIdx arbutil.MessageIndex) (*execution.MessageResult, error) {
 	return s.resultFromHeader(s.bc.GetHeaderByNumber(s.MessageIndexToBlockNumber(msgIdx)))
 }
@@ -1233,8 +1255,8 @@ func (s *ExecutionEngine) getL1PricingSurplus() (int64, error) {
 func (s *ExecutionEngine) cacheL1PriceDataOfMsg(msgIdx arbutil.MessageIndex, block *types.Block, blockBuiltUsingDelayedMessage bool) {
 	var callDataUnits uint64
 	if !blockBuiltUsingDelayedMessage {
-		// s.cachedL1PriceData tracks L1 price data for messages posted by Nitro,
-		// so delayed messages should not update cummulative values kept on it.
+		// s.cachedL1PriceData 只跟踪 Nitro 发布消息对应的 L1 定价数据，
+		// 因此延迟消息不应更新其中保存的累计值。
 
 		for _, tx := range block.Transactions() {
 			_, cachedUnits := tx.GetRawCachedCalldataUnits()
@@ -1280,11 +1302,10 @@ func (s *ExecutionEngine) cacheL1PriceDataOfMsg(msgIdx arbutil.MessageIndex, blo
 	}
 }
 
-// DigestMessage is used to create a block by executing msg against the latest state and storing it.
-// Also, while creating a block by executing msg against the latest state,
-// in parallel, creates a block by executing msgForPrefetch (msg+1) against the latest state
-// but does not store the block.
-// This helps in filling the cache, so that the next block creation is faster.
+// DigestMessage 会基于最新状态执行 msg，生成并保存对应区块。
+// 同时，在创建这个区块的过程中，还会并行地基于最新状态执行 msgForPrefetch（即 msg+1），
+// 生成一个仅用于预取的区块，但不会将其写入存储。
+// 这样可以提前填充缓存，从而加快下一次出块速度。
 func (s *ExecutionEngine) DigestMessage(msgIdx arbutil.MessageIndex, msg *arbostypes.MessageWithMetadata, msgForPrefetch *arbostypes.MessageWithMetadata) (*execution.MessageResult, error) {
 	if !s.createBlocksMutex.TryLock() {
 		return nil, errors.New("createBlock mutex held")
@@ -1342,10 +1363,10 @@ func (s *ExecutionEngine) digestMessageWithBlockMutex(msgIdxToDigest arbutil.Mes
 		var timeUntilUpgrade time.Duration
 		var timestamp time.Time
 		if timestampInt == 0 {
-			// This upgrade will take effect in the next block
+			// 该升级会在下一个区块生效。
 			timestamp = time.Now()
 		} else {
-			// This upgrade is scheduled for the future
+			// 该升级被安排在未来某个时间生效。
 			timestamp = time.Unix(int64(timestampInt), 0)
 			timeUntilUpgrade = time.Until(timestamp)
 		}
@@ -1380,6 +1401,7 @@ func (s *ExecutionEngine) digestMessageWithBlockMutex(msgIdxToDigest arbutil.Mes
 	return msgResult, nil
 }
 
+// ArbOSVersionForMessageIndex 返回指定消息索引对应 ArbOS 版本的已就绪 Promise。
 func (s *ExecutionEngine) ArbOSVersionForMessageIndex(msgIdx arbutil.MessageIndex) containers.PromiseInterface[uint64] {
 	block := s.bc.GetBlockByNumber(s.MessageIndexToBlockNumber(msgIdx))
 	if block == nil {
@@ -1389,6 +1411,7 @@ func (s *ExecutionEngine) ArbOSVersionForMessageIndex(msgIdx arbutil.MessageInde
 	return containers.NewReadyPromise(extra.ArbOSFormatVersion, nil)
 }
 
+// StopAndWait 停止执行引擎拥有的后台任务并等待其退出。
 func (s *ExecutionEngine) StopAndWait() {
 	if s.transactionFiltererRPCClient != nil {
 		s.transactionFiltererRPCClient.StopAndWait()
@@ -1396,6 +1419,7 @@ func (s *ExecutionEngine) StopAndWait() {
 	s.StopWaiter.StopAndWait()
 }
 
+// Start 启动执行引擎的后台任务，包括重组重排和缓存维护等流程。
 func (s *ExecutionEngine) Start(ctxIn context.Context) error {
 	s.StopWaiter.Start(ctxIn, s)
 
@@ -1453,7 +1477,7 @@ func (s *ExecutionEngine) Start(ctxIn context.Context) error {
 		}
 	})
 	if !s.disableStylusCacheMetricsCollection {
-		// periodically update stylus cache metrics
+		// 定期更新 stylus 缓存指标。
 		s.LaunchThread(func(ctx context.Context) {
 			for {
 				select {
@@ -1469,6 +1493,7 @@ func (s *ExecutionEngine) Start(ctxIn context.Context) error {
 	return nil
 }
 
+// ShouldTriggerMaintenance 判断是否应当尽快触发 trie flush 维护任务。
 func (s *ExecutionEngine) ShouldTriggerMaintenance(trieLimitBeforeFlushMaintenance time.Duration) bool {
 	if s.runningMaintenance.Load() {
 		return false
@@ -1486,13 +1511,14 @@ func (s *ExecutionEngine) ShouldTriggerMaintenance(trieLimitBeforeFlushMaintenan
 	return procTimeBeforeFlush <= trieLimitBeforeFlushMaintenance
 }
 
+// TriggerMaintenance 异步执行 trie 数据刷盘，并在期间阻塞并发出块。
 func (s *ExecutionEngine) TriggerMaintenance(capLimit uint64) {
 	if s.runningMaintenance.Swap(true) {
 		log.Info("Maintenance already running, skipping")
 		return
 	}
 
-	// Flushing the trie DB can be a long operation, so we run it in a new thread
+	// 刷新 trie DB 可能比较耗时，因此放到新线程中执行。
 	s.LaunchThread(func(ctx context.Context) {
 		defer s.runningMaintenance.Store(false)
 
@@ -1509,24 +1535,29 @@ func (s *ExecutionEngine) TriggerMaintenance(capLimit uint64) {
 	})
 }
 
+// MaintenanceStatus 返回当前维护任务是否正在运行。
 func (s *ExecutionEngine) MaintenanceStatus() *execution.MaintenanceStatus {
 	return &execution.MaintenanceStatus{
 		IsRunning: s.runningMaintenance.Load(),
 	}
 }
 
+// SetAddressChecker 设置状态执行期间使用的地址检查器。
 func (s *ExecutionEngine) SetAddressChecker(checker state.AddressChecker) {
 	s.addressChecker = checker
 }
 
+// SetEventFilter 设置排序执行期间使用的事件地址过滤器。
 func (s *ExecutionEngine) SetEventFilter(ef *eventfilter.EventFilter) {
 	s.eventFilter = ef
 }
 
+// SetTransactionFiltererRPCClient 设置用于上报过滤交易的 RPC 客户端。
 func (s *ExecutionEngine) SetTransactionFiltererRPCClient(client *TransactionFiltererRPCClient) {
 	s.transactionFiltererRPCClient = client
 }
 
+// IsTxHashInOnchainFilter 检查指定交易哈希是否已经存在于链上过滤器中。
 func (s *ExecutionEngine) IsTxHashInOnchainFilter(txHash common.Hash) (bool, error) {
 	currentHeader, err := s.getCurrentHeader()
 	if err != nil {
@@ -1546,7 +1577,7 @@ func (s *ExecutionEngine) IsTxHashInOnchainFilter(txHash common.Hash) (bool, err
 	return arbState.FilteredTransactions().IsFiltered(txHash)
 }
 
-// new
+// 候选区块背书处理
 func (s *ExecutionEngine) processCandidateBlockEndorsement(
 	ctx context.Context,
 	block *types.Block,
@@ -1579,7 +1610,7 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		"blockHash", block.Hash(),
 	)
 
-	// disabled / baseline 模式：没有接入 endorsement manager 或 policyConfig 时，直接跳过背书。
+	// 在禁用或基线模式下：如果未接入 endorsement manager 或 policyConfig，则直接跳过背书。
 	// 这样后续会按普通出块路径继续提交区块，不触发 rebuild。
 	if s.candidateBlockEndorser == nil || s.policyConfig == nil {
 		log.Info(
@@ -1622,7 +1653,7 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 		return nil, err
 	}
 
-	// 转成 endorsement 包的 CandidateBlockInput
+	// 转换为 endorsement 包中的 CandidateBlockInput。
 	input := &endorsement.CandidateBlockInput{
 		BlockHash:  candidateBlock.BlockHash,
 		ParentHash: candidateBlock.ParentHash,
@@ -1685,7 +1716,7 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 				"failedTxHashes", nil,
 			)
 		}
-		// Sequencer 外层捕获并处理重建
+		// 由 Sequencer 外层捕获并处理重建。
 		return nil, &ErrCandidateBlockRebuildRequired{
 			Decision: decision,
 		}
@@ -1702,6 +1733,7 @@ func (s *ExecutionEngine) processCandidateBlockEndorsement(
 }
 
 
+// SetCandidateBlockEndorser 设置在区块提交前校验候选区块的背书器。
 func (s *ExecutionEngine) SetCandidateBlockEndorser(m endorsement.EndorsementManager) {
 	if s.candidateBlockEndorser != nil {
 		panic("candidateBlockEndorser already set")
@@ -1712,6 +1744,7 @@ func (s *ExecutionEngine) SetCandidateBlockEndorser(m endorsement.EndorsementMan
 	s.candidateBlockEndorser = m
 }
 
+// SetPolicyConfig 设置区块背书流程使用的策略配置。
 func (s *ExecutionEngine) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
 	if s.policyConfig != nil {
 		panic("policyConfig already set")
@@ -1722,6 +1755,7 @@ func (s *ExecutionEngine) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
 	s.policyConfig = cfg
 }
 
+// ParsedBlockMetadata 表示反序列化后的区块元数据结构。
 type ParsedBlockMetadata struct {
 	Version        byte
 	Flags          byte
@@ -1730,7 +1764,9 @@ type ParsedBlockMetadata struct {
 	CommitmentData []byte
 }
 
-// 当前 version 1 固定包含 timeboostLen/timeboostPayload/commitmentRoot/commitmentData，不支持按 flags 缺省字段。
+// ParseBlockMetadata 将带版本的区块元数据解析为结构化表示。
+// 当前版本 1 固定包含 timeboostLen、timeboostPayload、commitmentRoot、commitmentData，
+// 不支持根据 flags 缺省字段。
 func ParseBlockMetadata(meta common.BlockMetadata) (*ParsedBlockMetadata, error) {
 	if len(meta) == 0 {
 		return nil, fmt.Errorf("empty block metadata")
@@ -1782,6 +1818,7 @@ func ParseBlockMetadata(meta common.BlockMetadata) (*ParsedBlockMetadata, error)
 	}
 }
 
+// SetCommitmentVerifierBLSPublicKeys 设置用于证书验签的 BLS 公钥注册表。
 func (s *ExecutionEngine) SetCommitmentVerifierBLSPublicKeys(reg endorsement.BLSPublicKeyRegistry) {
 	if s.commitmentVerifierBLSPublicKeys != nil {
 		panic("commitmentVerifierBLSPublicKeys already set")
@@ -1807,7 +1844,7 @@ func (s *ExecutionEngine) verifyParsedCommitmentCertificates(
 	if len(receipts) != len(block.Transactions()) {
 		return fmt.Errorf("receipt count mismatch: txs=%d receipts=%d", len(block.Transactions()), len(receipts))
 	}
-	// 提交前自校验器，不是完全独立的离线 verifier
+	// 这是提交前的自校验器，不是完全独立的离线验证器。
 	candidateBlock := hooks.CandidateBlock()
 	if candidateBlock == nil {
 		return errors.New("nil candidate block in hooks")
@@ -1816,8 +1853,8 @@ func (s *ExecutionEngine) verifyParsedCommitmentCertificates(
 		return errors.New("empty candidate block txs in hooks")
 	}
 
-	// cert 按 TxIndex 建索引；这里不要求 cert 数量 == block tx 数量，
-	// 只要求 metadata 中声明过的 cert 都能被验证。
+	// 按 TxIndex 为证书建立索引；这里不要求证书数量等于区块交易数量，
+	// 只要求 metadata 中声明过的证书都能够被验证。
 	certByTxIndex := make(map[int]*endorsement.TxEndorsementCertificate, len(parsedCerts))
 	for _, cert := range parsedCerts {
 		if cert == nil {
@@ -1852,7 +1889,7 @@ func (s *ExecutionEngine) verifyParsedCommitmentCertificates(
 			return fmt.Errorf("candidate tx index mismatch: candidate.TxIndex=%d mapKey=%d", tx.TxIndex, txIndex)
 		}
 
-		// 用真实 receipts 回填，确保重建 digest 时和最终块一致
+		// 用真实 receipts 回填，确保重建 digest 时与最终区块保持一致。
 		Receipt := receipts[txIndex]
 		req, err := builder.BuildRequest(&endorsement.CandidateBlockInput{
 			BlockHash:  block.Hash(),
@@ -1907,13 +1944,13 @@ func (s *ExecutionEngine) verifyParsedCommitmentCertificates(
 			}
 
 		case endorsementpolicy.AggregationBitmapSignatures:
-			// 第一版只做结构检查；后续可 parse bitmap payload 并校验签名集。
+			// 第一版只做结构检查；后续可以解析 bitmap 负载并校验签名集合。
 			if len(cert.EncodedProof) == 0 {
 				return fmt.Errorf("empty bitmap-signatures proof at txIndex=%d", txIndex)
 			}
 
 		case endorsementpolicy.AggregationCommitmentOnly:
-			// commitment-only 目前只有 commitment 语义，没有可恢复单签，先校验 proof 非空即可。
+			// commitment-only 目前只有 commitment 语义，没有可恢复的单签，因此先校验 proof 非空即可。
 			if len(cert.EncodedProof) == 0 {
 				return fmt.Errorf("empty commitment-only proof at txIndex=%d", txIndex)
 			}
@@ -1972,7 +2009,7 @@ func (s *ExecutionEngine) verifyBLSCertificate(
 		return errors.New("empty signer ids in BLS payload")
 	}
 
-	// 证书外层 signerIDs 与 proof 内 signerIDs 必须一致
+	// 证书外层的 signerIDs 必须与 proof 内部的 signerIDs 保持一致。
 	if len(payload.SignerIDs) != len(cert.SignerIDs) {
 		return fmt.Errorf("signer id count mismatch: payload=%d cert=%d", len(payload.SignerIDs), len(cert.SignerIDs))
 	}

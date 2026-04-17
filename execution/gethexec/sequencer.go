@@ -70,6 +70,7 @@ var (
 	currentSurplusGauge                     = metrics.NewRegisteredGauge("arb/sequencer/currentsurplus", nil)
 	expectedSurplusGauge                    = metrics.NewRegisteredGauge("arb/sequencer/expectedsurplus", nil)
 	waitForTxHistogram                      = metrics.NewRegisteredHistogram("arb/sequencer/waitfortx", nil, metrics.NewBoundedHistogramSample())
+	// 区块结束原因统计
 	// number of blocks ended because of block gas limit at least one tx wasn't included in block because of gas limit)
 	gasLimitedBlocksCounter = metrics.NewRegisteredCounter("arb/sequencer/block/gaslimited", nil)
 	// number of blocks ended because of txes data size limit
@@ -78,8 +79,10 @@ var (
 	txExhaustedBlocksCounter = metrics.NewRegisteredCounter("arb/sequencer/block/txexhausted", nil)
 )
 
+// SequencerConfig 定义 sequencer 的运行参数，包括出块节奏、队列大小、过滤规则和 timeboost 等配置。
 type SequencerConfig struct {
-	Enable                       bool                       `koanf:"enable"`
+	Enable bool `koanf:"enable"`
+	// 最小出块间隔
 	MaxBlockSpeed                time.Duration              `koanf:"max-block-speed" reload:"hot"`
 	ReadFromTxQueueTimeout       time.Duration              `koanf:"read-from-tx-queue-timeout" reload:"hot"`
 	MaxRevertGasReject           uint64                     `koanf:"max-revert-gas-reject" reload:"hot"`
@@ -103,15 +106,17 @@ type SequencerConfig struct {
 	expectedSurplusHardThreshold int
 
 	// 实验用途：拿到第一笔交易后，再额外等待这段时间收集更多交易
-	ExperimentalBatchingWindow   time.Duration              `koanf:"experimental-batching-window" reload:"hot"`
+	ExperimentalBatchingWindow time.Duration `koanf:"experimental-batching-window" reload:"hot"`
 }
 
+// TransactionFilteringConfig 描述交易过滤相关的本地规则与外部 RPC 过滤器配置。
 type TransactionFilteringConfig struct {
 	EventFilter                  eventfilter.EventFilterConfig `koanf:"event-filter"`
 	AddressFilter                addressfilter.Config          `koanf:"address-filter" reload:"hot"`
 	TransactionFiltererRPCClient rpcclient.ClientConfig        `koanf:"transaction-filterer-rpc-client" reload:"hot"`
 }
 
+// Validate 校验交易过滤配置是否合法。
 func (c *TransactionFilteringConfig) Validate() error {
 	if err := c.EventFilter.Validate(); err != nil {
 		return fmt.Errorf("invalid event filter config: %w", err)
@@ -131,17 +136,20 @@ var DefaultTransactionFilteringConfig = TransactionFilteringConfig{
 	TransactionFiltererRPCClient: DefaultTransactionFiltererRPCClientConfig,
 }
 
+// TransactionFilteringConfigAddOptions 向命令行参数集中注册交易过滤配置项。
 func TransactionFilteringConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	EventFilterAddOptions(prefix+".event-filter", f)
 	addressfilter.ConfigAddOptions(prefix+".address-filter", f)
 	rpcclient.RPCClientAddOptions(prefix+".transaction-filterer-rpc-client", f, &DefaultTransactionFilteringConfig.TransactionFiltererRPCClient)
 }
 
+// DangerousConfig 保存会放宽安全检查的危险开关。
 type DangerousConfig struct {
 	DisableSeqInboxMaxDataSizeCheck bool `koanf:"disable-seq-inbox-max-data-size-check"`
 	DisableBlobBaseFeeCheck         bool `koanf:"disable-blob-base-fee-check"`
 }
 
+// TimeboostConfig 定义 timeboost 快速通道和拍卖相关的配置。
 type TimeboostConfig struct {
 	Enable                       bool          `koanf:"enable"`
 	AuctionContractAddress       string        `koanf:"auction-contract-address"`
@@ -168,6 +176,7 @@ var DefaultTimeboostConfig = TimeboostConfig{
 	QueueTimeoutInBlocks:         5,
 }
 
+// Validate 校验 sequencer 配置，并解析依赖于字符串输入的阈值参数。
 func (c *SequencerConfig) Validate() error {
 	for _, address := range c.SenderWhitelist {
 		if len(address) == 0 {
@@ -228,6 +237,7 @@ func (c *SequencerConfig) Validate() error {
 	return nil
 }
 
+// ValidateMaxTxDataSize 检查单笔交易允许的最大数据长度是否超出 Nitro 可接受的上限。
 func ValidateMaxTxDataSize(maxTxDataSize uint64) error {
 	// tighter limit https://github.com/OffchainLabs/nitro/commit/ed015e752d7d24e59ec9e6f894fe1a26ffa19036
 	// The default block gas limit can fit 1523 txs
@@ -240,12 +250,13 @@ func ValidateMaxTxDataSize(maxTxDataSize uint64) error {
 	return nil
 }
 
+// SequencerConfigFetcher 返回当前生效的 sequencer 配置，便于支持热更新读取。
 type SequencerConfigFetcher func() *SequencerConfig
 
 var DefaultSequencerConfig = SequencerConfig{
 	Enable:                      false,
-	MaxBlockSpeed:               time.Second,					//time.Millisecond * 250,
-	ReadFromTxQueueTimeout:      200 * time.Millisecond,			//	time.Millisecond * 10,
+	MaxBlockSpeed:               time.Second,            //time.Millisecond * 250,
+	ReadFromTxQueueTimeout:      200 * time.Millisecond, //	time.Millisecond * 10,
 	MaxRevertGasReject:          0,
 	MaxAcceptableTimestampDelta: time.Hour,
 	SenderWhitelist:             []string{},
@@ -266,15 +277,15 @@ var DefaultSequencerConfig = SequencerConfig{
 	Dangerous:                    DefaultDangerousConfig,
 	TransactionFiltering:         DefaultTransactionFilteringConfig,
 
-	
 	// 实验默认值：拿到第一笔后再等 800ms
-	ExperimentalBatchingWindow:   800 * time.Millisecond,
+	ExperimentalBatchingWindow: 800 * time.Millisecond,
 }
 
 var DefaultDangerousConfig = DangerousConfig{
 	DisableSeqInboxMaxDataSizeCheck: false,
 }
 
+// SequencerConfigAddOptions 向命令行参数集中注册 sequencer 的配置项。
 func SequencerConfigAddOptions(prefix string, f *pflag.FlagSet) {
 	f.Bool(prefix+".enable", DefaultSequencerConfig.Enable, "act and post to l1 as sequencer")
 	f.Duration(prefix+".read-from-tx-queue-timeout", DefaultSequencerConfig.ReadFromTxQueueTimeout, "timeout for reading new messages")
@@ -300,12 +311,13 @@ func SequencerConfigAddOptions(prefix string, f *pflag.FlagSet) {
 
 	// new
 	f.Duration(
-	prefix+".experimental-batching-window",
-	DefaultSequencerConfig.ExperimentalBatchingWindow,
-	"experimental extra wait after receiving the first tx, to aggregate more txs into the same candidate block",
-)
+		prefix+".experimental-batching-window",
+		DefaultSequencerConfig.ExperimentalBatchingWindow,
+		"experimental extra wait after receiving the first tx, to aggregate more txs into the same candidate block",
+	)
 }
 
+// TimeboostAddOptions 向命令行参数集中注册 timeboost 配置项。
 func TimeboostAddOptions(prefix string, f *pflag.FlagSet) {
 	f.Bool(prefix+".enable", DefaultTimeboostConfig.Enable, "enable timeboost based on express lane auctions")
 	f.String(prefix+".auction-contract-address", DefaultTimeboostConfig.AuctionContractAddress, "Address of the proxy pointing to the ExpressLaneAuction contract")
@@ -319,27 +331,46 @@ func TimeboostAddOptions(prefix string, f *pflag.FlagSet) {
 	f.Uint64(prefix+".queue-timeout-in-blocks", DefaultTimeboostConfig.QueueTimeoutInBlocks, "maximum amount of time (measured in blocks) that Express Lane transactions can wait in the sequencer's queue")
 }
 
+// DangerousAddOptions 向命令行参数集中注册危险配置项。
 func DangerousAddOptions(prefix string, f *pflag.FlagSet) {
 	f.Bool(prefix+".disable-seq-inbox-max-data-size-check", DefaultDangerousConfig.DisableSeqInboxMaxDataSizeCheck, "DANGEROUS! disables nitro checks on sequencer MaxTxDataSize against the sequencer inbox MaxDataSize")
 	f.Bool(prefix+".disable-blob-base-fee-check", DefaultDangerousConfig.DisableBlobBaseFeeCheck, "DANGEROUS! disables nitro checks on sequencer for blob base fee")
 }
 
+// EventFilterAddOptions 向命令行参数集中注册事件过滤器配置项。
 func EventFilterAddOptions(prefix string, f *pflag.FlagSet) {
 	f.String(prefix+".path", "", "path to JSON file containing event filter rules")
 }
 
+// txQueueItem 表示进入 sequencer 内部队列的一笔待排序交易。
+// 它除了保存原始交易本身，还携带这笔交易在排队、超时控制、结果回传、
+// 以及 timeboost 优先级调度中所需的全部上下文信息。
 type txQueueItem struct {
-	tx              *types.Transaction
-	txSize          int // size in bytes of the marshalled transaction
-	options         *arbitrum_types.ConditionalOptions
-	resultChan      chan<- error
-	returnedResult  *atomic.Bool
-	ctx             context.Context
+	// tx 是实际要被 sequencer 排序和执行的以太坊交易对象。
+	tx *types.Transaction
+	// txSize 是交易编码后的字节大小，用于限制单笔交易大小和累计候选块的总交易大小。
+	txSize int
+	// options 保存条件交易的附加约束，例如要求特定 L1/L2 状态满足时才允许执行。
+	options *arbitrum_types.ConditionalOptions
+	// resultChan 用于把这笔交易最终的处理结果返回给提交方。
+	// 成功时通常发送 nil，失败时发送对应错误，然后关闭该 channel。
+	resultChan chan<- error
+	// returnedResult 用于保证 resultChan 只被写入并关闭一次，避免重复返回结果。
+	returnedResult *atomic.Bool
+	// ctx 绑定这笔交易的生命周期，用于控制排队等待、取消提交和超时退出。
+	ctx context.Context
+	// firstAppearance 记录这笔交易第一次进入 sequencer 视角的时间，
+	// 主要用于计算队列停留时间，以及 nonce failure 缓存的过期时刻。
 	firstAppearance time.Time
-	isTimeboosted   bool
-	blockStamp      uint64 // block number at which timeboosted tx was added to the txQueue
+	// isTimeboosted 标记该交易是否来自 timeboost/express lane 通道。
+	// 这会影响它的排队优先级和超时处理逻辑。
+	isTimeboosted bool
+	// blockStamp 记录 timeboost 交易进入主队列时的区块高度快照。
+	// sequencer 会结合它和 QueueTimeoutInBlocks 判断该交易是否已经等待过久。
+	blockStamp uint64
 }
 
+// returnResultMaybeLog 向调用方返回一次处理结果，并在重复返回时按需记录日志。
 func (i *txQueueItem) returnResultMaybeLog(err error, outputLog bool) {
 	if i.returnedResult.Swap(true) {
 		if outputLog {
@@ -351,24 +382,30 @@ func (i *txQueueItem) returnResultMaybeLog(err error, outputLog bool) {
 	close(i.resultChan)
 }
 
+// returnResult 向调用方返回处理结果，不额外输出重复返回日志。
 func (i *txQueueItem) returnResult(err error) {
 	i.returnResultMaybeLog(err, false)
 }
 
+// nonceCache 缓存当前候选区块上下文下各账户的 nonce，减少重复访问状态树。
 type nonceCache struct {
 	cache *containers.LruCache[common.Address, uint64]
 	block common.Hash
 	dirty *types.Header
 }
 
+// newNonceCache 创建指定容量的 nonce 缓存。
 func newNonceCache(size int) *nonceCache {
 	return &nonceCache{
 		cache: containers.NewLruCache[common.Address, uint64](size),
+		// block 是 nonce 缓存当前关联的区块上下文的锚点，通常是正在构建的候选区块的父区块哈希。
 		block: common.Hash{},
+		// dirty 是正在构建的候选区块，如果不为 nil 则表示缓存中的 nonce 可能已经被更新但还未落地到新区块
 		dirty: nil,
 	}
 }
 
+// matches 判断缓存是否仍与当前待执行区块头匹配。
 func (c *nonceCache) matches(header *types.Header) bool {
 	if c.dirty != nil {
 		// Note, even though the of the header changes, c.dirty points to the
@@ -378,6 +415,7 @@ func (c *nonceCache) matches(header *types.Header) bool {
 	return c.block == header.ParentHash
 }
 
+// Reset 清空 nonce 缓存并重置其关联的区块上下文。
 func (c *nonceCache) Reset(block common.Hash) {
 	if c.cache.Len() > 0 {
 		nonceCacheClearedCounter.Inc(1)
@@ -387,12 +425,14 @@ func (c *nonceCache) Reset(block common.Hash) {
 	c.dirty = nil
 }
 
+// BeginNewBlock 在开始构建新区块前准备 nonce 缓存状态。
 func (c *nonceCache) BeginNewBlock() {
 	if c.dirty != nil {
 		c.Reset(common.Hash{})
 	}
 }
 
+// Get 获取地址在当前区块上下文中的 nonce，未命中时回退到状态树查询。
 func (c *nonceCache) Get(header *types.Header, statedb *state.StateDB, addr common.Address) uint64 {
 	if !c.matches(header) {
 		c.Reset(header.ParentHash)
@@ -408,6 +448,7 @@ func (c *nonceCache) Get(header *types.Header, statedb *state.StateDB, addr comm
 	return nonce
 }
 
+// Update 更新地址在当前候选区块中的最新 nonce。
 func (c *nonceCache) Update(header *types.Header, addr common.Address, nonce uint64) {
 	if !c.matches(header) {
 		c.Reset(header.ParentHash)
@@ -416,6 +457,7 @@ func (c *nonceCache) Update(header *types.Header, addr common.Address, nonce uin
 	c.cache.Add(addr, nonce)
 }
 
+// Finalize 在候选区块成功落地后，把缓存锚点推进到新区块。
 func (c *nonceCache) Finalize(block *types.Block) {
 	// Note: we don't use c.matches here because the header will have changed
 	if c.block == block.ParentHash() {
@@ -426,19 +468,23 @@ func (c *nonceCache) Finalize(block *types.Block) {
 	}
 }
 
+// Caching 返回 nonce 缓存当前是否启用。
 func (c *nonceCache) Caching() bool {
 	return c.cache != nil && c.cache.Size() > 0
 }
 
+// Resize 调整 nonce 缓存容量。
 func (c *nonceCache) Resize(newSize int) {
 	c.cache.Resize(newSize)
 }
 
+// addressAndNonce 是 nonce 失败缓存的键，唯一标识某地址上的某个 nonce。
 type addressAndNonce struct {
 	address common.Address
 	nonce   uint64
 }
 
+// nonceFailure 记录因 nonce 过高而暂存的交易及其过期信息。
 type nonceFailure struct {
 	queueItem txQueueItem
 	nonceErr  error
@@ -446,18 +492,22 @@ type nonceFailure struct {
 	revived   bool
 }
 
+// nonceFailureCache 保存等待前序交易到达的 nonce 失败交易。
 type nonceFailureCache struct {
 	*containers.LruCache[addressAndNonce, *nonceFailure]
 	getExpiry func() time.Duration
 }
 
+// Contains 判断给定 nonce 错误对应的交易是否已在失败缓存中。
 func (c nonceFailureCache) Contains(err NonceError) bool {
 	key := addressAndNonce{err.sender, err.txNonce}
 	return c.LruCache.Contains(key)
 }
 
+// Add 将 nonce 过高的交易加入失败缓存，等待其前序交易出现。
 func (c nonceFailureCache) Add(err NonceError, queueItem txQueueItem) {
 	expiry := queueItem.firstAppearance.Add(c.getExpiry())
+	// 如果交易已经在缓存中或者已经过期，则直接返回错误结果，不再加入缓存。
 	if c.Contains(err) || time.Now().After(expiry) {
 		queueItem.returnResult(err)
 		return
@@ -475,17 +525,20 @@ func (c nonceFailureCache) Add(err NonceError, queueItem txQueueItem) {
 	}
 }
 
+// synchronizedTxQueue 为重试队列提供线程安全的 push/pop 操作。
 type synchronizedTxQueue struct {
 	queue containers.Queue[txQueueItem]
 	mutex sync.RWMutex
 }
 
+// Push 向同步队列尾部压入一个待处理项。
 func (q *synchronizedTxQueue) Push(item txQueueItem) {
 	q.mutex.Lock()
 	q.queue.Push(item)
 	q.mutex.Unlock()
 }
 
+// Pop 从同步队列头部弹出一个待处理项。
 func (q *synchronizedTxQueue) Pop() txQueueItem {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
@@ -493,12 +546,14 @@ func (q *synchronizedTxQueue) Pop() txQueueItem {
 
 }
 
+// Len 返回同步队列当前长度。
 func (q *synchronizedTxQueue) Len() int {
 	q.mutex.RLock()
 	defer q.mutex.RUnlock()
 	return q.queue.Len()
 }
 
+// Sequencer 负责接收交易、筛选交易、构建候选区块并驱动执行引擎完成排序出块。
 type Sequencer struct {
 	stopwaiter.StopWaiter
 
@@ -539,7 +594,7 @@ type Sequencer struct {
 	policyConfig   *endorsementpolicy.PolicyConfig
 }
 
-// new
+// SetPolicyResolver 设置 endorsement policy 解析器，必须在 sequencer 启动前调用。
 func (s *Sequencer) SetPolicyResolver(resolver endorsementpolicy.PolicyResolver) {
 	if s.Started() {
 		panic("trying to set policy resolver after start")
@@ -550,6 +605,7 @@ func (s *Sequencer) SetPolicyResolver(resolver endorsementpolicy.PolicyResolver)
 	s.policyResolver = resolver
 }
 
+// SetPolicyConfig 设置 endorsement policy 的运行参数，必须在 sequencer 启动前调用。
 func (s *Sequencer) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
 	if s.Started() {
 		panic("trying to set policy config after start")
@@ -560,6 +616,7 @@ func (s *Sequencer) SetPolicyConfig(cfg *endorsementpolicy.PolicyConfig) {
 	s.policyConfig = cfg
 }
 
+// NewSequencer 创建并初始化一个 Sequencer 实例及其依赖组件。
 func NewSequencer(execEngine *ExecutionEngine, l1Reader *headerreader.HeaderReader, configFetcher SequencerConfigFetcher, parentChainId *big.Int) (*Sequencer, error) {
 	config := configFetcher()
 	if err := config.Validate(); err != nil {
@@ -620,6 +677,7 @@ func NewSequencer(execEngine *ExecutionEngine, l1Reader *headerreader.HeaderRead
 	return s, nil
 }
 
+// onNonceFailureEvict 在 nonce 失败缓存项被驱逐时返回最终结果或尝试转发该交易。
 func (s *Sequencer) onNonceFailureEvict(_ addressAndNonce, failure *nonceFailure) {
 	if failure.revived {
 		return
@@ -650,13 +708,18 @@ func (s *Sequencer) onNonceFailureEvict(_ addressAndNonce, failure *nonceFailure
 
 // ctxWithTimeout is like context.WithTimeout except a timeout of 0 means unlimited instead of instantly expired.
 func ctxWithTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	// 如果 timeout 是 0，返回一个没有截止时间的 context，这样调用方就不需要担心 context 超时了。
 	if timeout == time.Duration(0) {
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, timeout)
 }
 
+// PublishTransaction 接收普通交易提交请求，并等待该交易得到排序结果。
 func (s *Sequencer) PublishTransaction(parentCtx context.Context, tx *types.Transaction, options *arbitrum_types.ConditionalOptions) error {
+	// 先检查当前节点是否处于 forward 模式。
+	// 如果是，就优先把交易转发给目标 sequencer，避免本地重复排队。
+	// 只有在对端明确返回 ErrNoSequencer 时，才回退到本地 sequencer 流程。
 	_, forwarder := s.GetPauseAndForwarder()
 	if forwarder != nil {
 		err := forwarder.PublishTransaction(parentCtx, tx, options)
@@ -667,22 +730,30 @@ func (s *Sequencer) PublishTransaction(parentCtx context.Context, tx *types.Tran
 
 	config := s.config()
 	queueTimeout := config.QueueTimeout
-	queueCtx, cancelFunc := ctxWithTimeout(parentCtx, queueTimeout+config.Timeboost.ExpressLaneAdvantage) // Include timeboost delay in ctx timeout
+	// queueCtx 控制交易在后台排队和等待处理的生命周期。
+	// 对普通交易来说，这里额外叠加 ExpressLaneAdvantage，
+	// 因为 express lane 激活时普通交易可能被主动延后这么久。
+	queueCtx, cancelFunc := ctxWithTimeout(parentCtx, queueTimeout+config.Timeboost.ExpressLaneAdvantage)
 	defer cancelFunc()
 
+	// resultChan 用来接收后台排序线程最终返回的处理结果。
 	resultChan := make(chan error, 1)
+	// 把交易压入主队列。这里传入 false，表示它不是 express lane controller 的 timeboost 交易，
+	// 因此如果当前轮次存在 express lane 控制者，它可能需要让出一段优势窗口。
 	err := s.publishTransactionToQueue(queueCtx, tx, options, resultChan, false /* delay tx if express lane is active */)
 	if err != nil {
 		return err
 	}
 
 	now := time.Now()
-	// Just to be safe, make sure we don't run over twice the queue timeout
+	// abortCtx 是前台请求侧更宽松的一层总超时保护。
+	// queueCtx 只约束后台排队过程，而 abortCtx 防止调用方在异常情况下无限等待。
 	abortCtx, cancel := ctxWithTimeout(parentCtx, queueTimeout*2)
 	defer cancel()
 
 	select {
 	case res := <-resultChan:
+		// 正常拿到后台处理结果，可能是成功(nil)也可能是明确的业务错误。
 		return res
 	case <-abortCtx.Done():
 		// We use abortCtx here and not queueCtx, because the QueueTimeout only applies to the background queue.
@@ -696,6 +767,7 @@ func (s *Sequencer) PublishTransaction(parentCtx context.Context, tx *types.Tran
 	}
 }
 
+// PublishAuctionResolutionTransaction 提交拍卖结算交易，并给予高优先级处理。
 func (s *Sequencer) PublishAuctionResolutionTransaction(ctx context.Context, tx *types.Transaction) error {
 	if !s.config().Timeboost.Enable {
 		return errors.New("timeboost not enabled")
@@ -748,6 +820,7 @@ func (s *Sequencer) PublishAuctionResolutionTransaction(ctx context.Context, tx 
 	return nil
 }
 
+// PublishExpressLaneTransaction 提交 express lane 交易，并交给 timeboost 逻辑校验和排序。
 func (s *Sequencer) PublishExpressLaneTransaction(ctx context.Context, msg *timeboost.ExpressLaneSubmission) error {
 	if !s.config().Timeboost.Enable {
 		return errors.New("timeboost not enabled")
@@ -779,15 +852,16 @@ func (s *Sequencer) PublishExpressLaneTransaction(ctx context.Context, msg *time
 	return s.expressLaneService.sequenceExpressLaneSubmission(msg)
 }
 
+// PublishTimeboostedTransaction 将由 express lane 控制器提交的交易压入 timeboost 队列。
 func (s *Sequencer) PublishTimeboostedTransaction(queueCtx context.Context, tx *types.Transaction, options *arbitrum_types.ConditionalOptions) error {
 	resultChan := make(chan error, 1)
 	return s.publishTransactionToQueue(queueCtx, tx, options, resultChan, true)
 }
 
+// publishTransactionToQueue 在完成基础准入检查后，把交易封装成 txQueueItem 放入主队列。
 func (s *Sequencer) publishTransactionToQueue(queueCtx context.Context, tx *types.Transaction, options *arbitrum_types.ConditionalOptions, resultChan chan error, isExpressLaneController bool) error {
 	config := s.config()
-	// Only try to acquire Rlock and check for hard threshold if l1reader is not nil
-	// And hard threshold was enabled, this prevents spamming of read locks when not needed
+	// 如果配置了预期剩余 gas 价格的硬阈值，并且当前已经更新过预期剩余 gas 价格且它低于该硬阈值，则拒绝接受新交易。
 	if s.l1Reader != nil && config.ExpectedSurplusHardThreshold != "default" {
 		s.expectedSurplusMutex.RLock()
 		if s.expectedSurplusUpdated && s.expectedSurplus < int64(config.expectedSurplusHardThreshold) {
@@ -799,6 +873,7 @@ func (s *Sequencer) publishTransactionToQueue(queueCtx context.Context, tx *type
 	sequencerBacklogGauge.Inc(1)
 	defer sequencerBacklogGauge.Dec(1)
 
+	// 如果配置了发送者白名单，则在入队前先完成签名恢复并校验发送者身份。
 	if len(s.senderWhitelist) > 0 {
 		signer := types.LatestSigner(s.execEngine.bc.Config())
 		sender, err := types.Sender(signer, tx)
@@ -816,6 +891,8 @@ func (s *Sequencer) publishTransactionToQueue(queueCtx context.Context, tx *type
 		return types.ErrTxTypeNotSupported
 	}
 
+	// 当 timeboost 生效且当前轮次已有 express lane 控制者时，
+	// 普通交易需要主动等待一小段优势窗口，让优先通道交易先进入排序流程。
 	if s.config().Timeboost.Enable && s.expressLaneService != nil {
 		if !isExpressLaneController && s.expressLaneService.currentRoundHasController() {
 			time.Sleep(s.config().Timeboost.ExpressLaneAdvantage)
@@ -823,10 +900,13 @@ func (s *Sequencer) publishTransactionToQueue(queueCtx context.Context, tx *type
 	}
 
 	var blockStamp uint64
+	// 对 express lane controller 提交的交易记录一个入队时的区块高度，
+	// 后续 createBlock 会据此判断它是否已经在队列中等待了太多个区块。
 	if isExpressLaneController && config.Timeboost.QueueTimeoutInBlocks > 0 {
 		blockStamp = s.execEngine.bc.CurrentBlock().Number.Uint64()
 	}
 
+	// 封装成内部队列项，把交易内容、条件参数、回包通道、上下文和 timeboost 元信息一起带入队列。
 	queueItem := txQueueItem{
 		tx:              tx,
 		txSize:          int(tx.Size()), // #nosec G115
@@ -840,12 +920,15 @@ func (s *Sequencer) publishTransactionToQueue(queueCtx context.Context, tx *type
 	}
 	select {
 	case s.txQueue <- queueItem:
+		// 成功入队后，后续结果会由 createBlock 或重试/失败路径写回 resultChan。
 	case <-queueCtx.Done():
+		// 如果在真正入队前调用方就取消或超时，直接把 context 错误返回给上层。
 		return queueCtx.Err()
 	}
 	return nil
 }
 
+// preTxFilter 在交易执行前做 nonce、条件交易和地址过滤等检查。
 func (s *Sequencer) preTxFilter(_ *params.ChainConfig, header *types.Header, statedb *state.StateDB, _ *arbosState.ArbosState, tx *types.Transaction, options *arbitrum_types.ConditionalOptions, sender common.Address, l1Info *arbos.L1Info) error {
 	if s.nonceCache.Caching() {
 		stateNonce := s.nonceCache.Get(header, statedb, sender)
@@ -873,6 +956,7 @@ func (s *Sequencer) preTxFilter(_ *params.ChainConfig, header *types.Header, sta
 	return nil
 }
 
+// postTxFilter 在交易执行后更新过滤状态、处理 revert 策略并推进 nonce 缓存。
 func (s *Sequencer) postTxFilter(header *types.Header, statedb *state.StateDB, _ *arbosState.ArbosState, tx *types.Transaction, sender common.Address, dataGas uint64, result *core.ExecutionResult) error {
 	if s.eventFilter != nil {
 		logs := statedb.GetCurrentTxLogs()
@@ -909,6 +993,7 @@ func (s *Sequencer) postTxFilter(header *types.Header, statedb *state.StateDB, _
 	return nil
 }
 
+// CheckHealth 检查 sequencer 或其当前 forwarder 是否处于可服务状态。
 func (s *Sequencer) CheckHealth(ctx context.Context) error {
 	pauseChan, forwarder := s.GetPauseAndForwarder()
 	if forwarder != nil {
@@ -921,6 +1006,7 @@ func (s *Sequencer) CheckHealth(ctx context.Context) error {
 	return err
 }
 
+// ForwardTarget 返回当前配置的主转发目标地址。
 func (s *Sequencer) ForwardTarget() string {
 	s.activeMutex.Lock()
 	defer s.activeMutex.Unlock()
@@ -930,6 +1016,7 @@ func (s *Sequencer) ForwardTarget() string {
 	return s.forwarder.PrimaryTarget()
 }
 
+// ForwardTo 将 sequencer 切换到转发模式，把交易转发给指定目标。
 func (s *Sequencer) ForwardTo(url string) error {
 	s.activeMutex.Lock()
 	defer s.activeMutex.Unlock()
@@ -960,6 +1047,7 @@ func (s *Sequencer) ForwardTo(url string) error {
 	return err
 }
 
+// Activate 让 sequencer 进入活跃出块状态，并关闭已有 forwarder。
 func (s *Sequencer) Activate() {
 	s.activeMutex.Lock()
 	defer s.activeMutex.Unlock()
@@ -981,6 +1069,7 @@ func (s *Sequencer) Activate() {
 	}
 }
 
+// Pause 暂停本地出块，并清理现有 forwarder 状态。
 func (s *Sequencer) Pause() {
 	s.activeMutex.Lock()
 	defer s.activeMutex.Unlock()
@@ -995,14 +1084,14 @@ func (s *Sequencer) Pause() {
 
 var ErrNoSequencer = errors.New("sequencer temporarily not available")
 
+// GetPauseAndForwarder 读取当前暂停信号和 forwarder 状态。
 func (s *Sequencer) GetPauseAndForwarder() (chan struct{}, *TxForwarder) {
 	s.activeMutex.Lock()
 	defer s.activeMutex.Unlock()
 	return s.pauseChan, s.forwarder
 }
 
-// getForwarder returns accurate forwarder and pauses if needed.
-// Required for processing timeboost txs, as just checking forwarder==nil doesn't imply the sequencer to be chosen
+// getForwarder 返回当前可用的 forwarder；如果 sequencer 处于暂停态则等待恢复。
 func (s *Sequencer) getForwarder(ctx context.Context) (*TxForwarder, error) {
 	for {
 		pause, forwarder := s.GetPauseAndForwarder()
@@ -1018,7 +1107,7 @@ func (s *Sequencer) getForwarder(ctx context.Context) (*TxForwarder, error) {
 	}
 }
 
-// only called from createBlock, may be paused
+// handleInactive 在本节点不可出块时把当前候选交易转发或重新入队。
 func (s *Sequencer) handleInactive(ctx context.Context, queueItems []txQueueItem) bool {
 	forwarder, err := s.getForwarder(ctx)
 	if err != nil {
@@ -1030,6 +1119,7 @@ func (s *Sequencer) handleInactive(ctx context.Context, queueItems []txQueueItem
 	publishResults := make(chan *txQueueItem, len(queueItems))
 	for _, item := range queueItems {
 		item := item
+		// 并行转发每笔交易，减少等待时间；每笔交易转发完成后会把结果写回 publishResults 通道。
 		go func() {
 			res := forwarder.PublishTransaction(item.ctx, item.tx, item.options)
 			if errors.Is(res, ErrNoSequencer) {
@@ -1053,6 +1143,7 @@ func (s *Sequencer) handleInactive(ctx context.Context, queueItems []txQueueItem
 
 var sequencerInternalError = errors.New("sequencer internal error")
 
+// FullSequencingHooks 实现执行引擎所需的 hooks，并携带当前候选区块的交易与过滤逻辑。
 type FullSequencingHooks struct {
 	queueItems               []txQueueItem
 	sequencedQueueItemsCount int
@@ -1064,22 +1155,25 @@ type FullSequencingHooks struct {
 	blockFilter              func(*types.Header, *state.StateDB, types.Transactions, types.Receipts) error
 	txSizeLimitReached       bool
 	// new
-	candidateBlock 			*CandidateBlock
+	candidateBlock *CandidateBlock
 }
 
-// new
+// SetCandidateBlock 记录当前这轮排序所对应的候选区块。
 func (s *FullSequencingHooks) SetCandidateBlock(c *CandidateBlock) {
 	s.candidateBlock = c
 }
 
+// CandidateBlock 返回当前绑定的候选区块。
 func (s *FullSequencingHooks) CandidateBlock() *CandidateBlock {
 	return s.candidateBlock
 }
 
+// QueueItems 返回本轮参与排序的队列项。
 func (s *FullSequencingHooks) QueueItems() []txQueueItem {
 	return s.queueItems
 }
 
+// Txes 提取队列项中的原始交易列表。
 func (s *FullSequencingHooks) Txes() types.Transactions {
 	txs := make(types.Transactions, 0, len(s.queueItems))
 	for _, item := range s.queueItems {
@@ -1088,24 +1182,36 @@ func (s *FullSequencingHooks) Txes() types.Transactions {
 	return txs
 }
 
-
+// MessageFromTxes 将本轮成功排序的交易编码为一条 L1 incoming message。
 func (s *FullSequencingHooks) MessageFromTxes(header *arbostypes.L1IncomingMessageHeader) (*arbostypes.L1IncomingMessage, error) {
 	var l2Message []byte
+	// 如果本轮只有一笔交易成功排序，就直接按单笔 SignedTx 消息编码。
+	// 这是更紧凑的编码形式，不需要外层 batch 包装和逐笔长度前缀。
 	if len(s.txErrors) == 1 && s.txErrors[0] == nil {
 		tx, err := s.SequencedTx(0)
 		if err != nil {
 			return nil, err
 		}
+		// 把交易编码成二进制，作为 L2 消息 payload 的主体内容。
 		txBytes, err := tx.MarshalBinary()
 		if err != nil {
 			return nil, err
 		}
+		// 单笔交易消息格式：
+		// [1 byte kind = SignedTx] + [tx binary]
 		l2Message = append(l2Message, arbos.L2MessageKind_SignedTx)
 		l2Message = append(l2Message, txBytes...)
 	} else {
+		// 多笔交易时改用 Batch 消息格式。
+		// 外层先写一个 Batch kind，里面再顺序拼接每一笔成功交易：
+		// [8 bytes item length] + [1 byte kind = SignedTx] + [tx binary]
+		//
+		// 注意这里只会编码成功排序的交易；执行失败的交易会在 txErrors 中体现，
+		// 但不会被打进最终的 L2 message。
 		l2Message = append(l2Message, arbos.L2MessageKind_Batch)
 		sizeBuf := make([]byte, 8)
 		for i := 0; i < len(s.txErrors); i++ {
+			// 跳过本轮执行失败或未被接受的交易，只保留成功交易。
 			if s.txErrors[i] != nil {
 				continue
 			}
@@ -1113,10 +1219,14 @@ func (s *FullSequencingHooks) MessageFromTxes(header *arbostypes.L1IncomingMessa
 			if err != nil {
 				return nil, err
 			}
+			// 每笔交易先序列化，再写入 batch item。
 			txBytes, err := tx.MarshalBinary()
 			if err != nil {
 				return nil, err
 			}
+			// Batch 中每个元素的长度前缀包含：
+			// - 1 字节的内部消息类型（这里固定是 SignedTx）
+			// - 后续交易二进制长度
 			// #nosec G115
 			binary.BigEndian.PutUint64(sizeBuf, uint64(len(txBytes)+1))
 			l2Message = append(l2Message, sizeBuf...)
@@ -1124,19 +1234,23 @@ func (s *FullSequencingHooks) MessageFromTxes(header *arbostypes.L1IncomingMessa
 			l2Message = append(l2Message, txBytes...)
 		}
 	}
+	// 最终生成的 L2 message 必须受 ArbOS 的单条消息大小上限约束。
 	if len(l2Message) > arbostypes.MaxL2MessageSize {
 		return nil, errors.New("l2message too long")
 	}
+	// 用调用方提供的 header 和刚刚编码出的 L2 payload 组装完整的 L1 incoming message。
 	return &arbostypes.L1IncomingMessage{
 		Header: header,
 		L2msg:  l2Message,
 	}, nil
 }
 
+// GetTxErrors 返回当前已记录的每笔交易执行结果。
 func (s *FullSequencingHooks) GetTxErrors() []error {
 	return s.txErrors
 }
 
+// InsertLastTxError 追加最近一笔已排序交易的执行结果。
 func (s *FullSequencingHooks) InsertLastTxError(err error) {
 	s.txErrors = append(s.txErrors, err)
 }
@@ -1167,10 +1281,12 @@ func (s *FullSequencingHooks) NextTxToSequence() (*types.Transaction, *arbitrum_
 	return s.queueItems[s.sequencedQueueItemsCount-1].tx, s.queueItems[s.sequencedQueueItemsCount-1].options, nil
 }
 
+// DiscardInvalidTxsEarly 指示执行引擎可在早期丢弃明显无效的交易。
 func (s *FullSequencingHooks) DiscardInvalidTxsEarly() bool {
 	return true
 }
 
+// SequencedTx 返回指定序号上已经进入排序流程的交易。
 func (s *FullSequencingHooks) SequencedTx(txId int) (*types.Transaction, error) {
 	// This is not supposed to happen, if so we have a bug
 	if txId > s.sequencedQueueItemsCount {
@@ -1179,6 +1295,7 @@ func (s *FullSequencingHooks) SequencedTx(txId int) (*types.Transaction, error) 
 	return s.queueItems[txId].tx, nil
 }
 
+// PreTxFilter 调用外部注入的交易前过滤逻辑。
 func (s *FullSequencingHooks) PreTxFilter(config *params.ChainConfig, header *types.Header, db *state.StateDB, a *arbosState.ArbosState, transaction *types.Transaction, options *arbitrum_types.ConditionalOptions, address common.Address, info *arbos.L1Info) error {
 	if s.preTxFilter != nil {
 		return s.preTxFilter(config, header, db, a, transaction, options, address, info)
@@ -1186,6 +1303,7 @@ func (s *FullSequencingHooks) PreTxFilter(config *params.ChainConfig, header *ty
 	return nil
 }
 
+// PostTxFilter 调用外部注入的交易后过滤逻辑。
 func (s *FullSequencingHooks) PostTxFilter(header *types.Header, db *state.StateDB, a *arbosState.ArbosState, transaction *types.Transaction, address common.Address, u uint64, result *core.ExecutionResult) error {
 	if s.postTxFilter != nil {
 		return s.postTxFilter(header, db, a, transaction, address, u, result)
@@ -1193,6 +1311,7 @@ func (s *FullSequencingHooks) PostTxFilter(header *types.Header, db *state.State
 	return nil
 }
 
+// BlockFilter 调用外部注入的区块级过滤逻辑。
 func (s *FullSequencingHooks) BlockFilter(header *types.Header, db *state.StateDB, transactions types.Transactions, receipts types.Receipts) error {
 	if s.blockFilter != nil {
 		return s.blockFilter(header, db, transactions, receipts)
@@ -1200,6 +1319,7 @@ func (s *FullSequencingHooks) BlockFilter(header *types.Header, db *state.StateD
 	return nil
 }
 
+// MakeSequencingHooks 构造一组用于完整交易排序流程的 hooks。
 func MakeSequencingHooks(
 	items []txQueueItem,
 	maxSequencedTxsSize int,
@@ -1242,6 +1362,7 @@ func MakeZeroTxSizeSequencingHooksForTesting(
 	)
 }
 
+// expireNonceFailures 清理已过期的 nonce 失败交易，并返回下一次过期触发计时器。
 func (s *Sequencer) expireNonceFailures() *time.Timer {
 	defer nonceFailureCacheSizeGauge.Update(int64(s.nonceFailures.Len()))
 	for {
@@ -1269,24 +1390,33 @@ func (s *Sequencer) expireNonceFailures() *time.Timer {
 	}
 }
 
-// There's no guarantee that returned tx nonces will be correct
+// precheckNonces 基于当前状态和已见交易顺序做一次轻量 nonce 预检查。
 func (s *Sequencer) precheckNonces(queueItems []txQueueItem) []txQueueItem {
 	bc := s.execEngine.bc
 	latestHeader := bc.CurrentBlock()
+	// 取当前最新区块对应的状态快照，作为本轮 nonce 预检查的基准状态。
+	// 这里不执行交易，只做一次便宜的前置筛查，尽量早地剔除必然失败的交易。
 	latestState, err := bc.StateAt(latestHeader.Root)
 	if err != nil {
 		log.Error("failed to get current state to pre-check nonces", "err", err)
 		return queueItems
 	}
+	// 构造“下一块”语义下的 signer，用它来恢复交易发送者地址。
 	nextHeaderNumber := arbmath.BigAdd(latestHeader.Number, common.Big1)
 	arbosVersion := types.DeserializeHeaderExtraInformation(latestHeader).ArbOSFormatVersion
 	signer := types.MakeSigner(bc.Config(), nextHeaderNumber, latestHeader.Time, arbosVersion)
+	// outputQueueItems 是通过预检查后，仍然值得进入后续正式排序流程的交易。
 	outputQueueItems := make([]txQueueItem, 0, len(queueItems))
+	// nextQueueItem 用于“插队”处理刚被前序交易唤醒的 nonce failure 交易，
+	// 让它尽快在当前扫描过程中重新参与判断。
 	var nextQueueItem *txQueueItem
 	var queueItemsIdx int
+	// pendingNonces 记录“按当前扫描顺序推演出来的每个地址下一可用 nonce”。
+	// 它不等于真实 state，而是“假设前面已经接受的交易都成功”时的临时视图。
 	pendingNonces := make(map[common.Address]uint64)
 	for {
 		var queueItem txQueueItem
+		// 优先处理被前序交易刚刚唤醒的交易；否则按原队列顺序继续扫描。
 		if nextQueueItem != nil {
 			queueItem = *nextQueueItem
 			nextQueueItem = nil
@@ -1297,11 +1427,14 @@ func (s *Sequencer) precheckNonces(queueItems []txQueueItem) []txQueueItem {
 			break
 		}
 		tx := queueItem.tx
+		// 先恢复发送者地址；如果签名本身有问题，就可以直接返回错误。
 		sender, err := types.Sender(signer, tx)
 		if err != nil {
 			queueItem.returnResult(err)
 			continue
 		}
+		// stateNonce 是链上当前状态里的真实 nonce。
+		// pendingNonce 是把当前批次前面已经“暂时接受”的交易考虑进去后的推演 nonce。
 		stateNonce := s.nonceCache.Get(latestHeader, latestState, sender)
 		pendingNonce, pending := pendingNonces[sender]
 		if !pending {
@@ -1309,6 +1442,7 @@ func (s *Sequencer) precheckNonces(queueItems []txQueueItem) []txQueueItem {
 		}
 		txNonce := tx.Nonce()
 		if txNonce == pendingNonce {
+			// 这是当前顺序下刚好可接上的交易，先把该地址的推演 nonce 向前推进一位。
 			pendingNonces[sender] = txNonce + 1
 			nextKey := addressAndNonce{sender, txNonce + 1}
 			revivingFailure, exists := s.nonceFailures.Get(nextKey)
@@ -1321,6 +1455,8 @@ func (s *Sequencer) precheckNonces(queueItems []txQueueItem) []txQueueItem {
 				if err != nil {
 					revivingFailure.queueItem.returnResult(err)
 				} else {
+					// 让刚被唤醒的后继交易在下一轮循环中优先处理，
+					// 这样可以在一次扫描里连续接上 nonce 链。
 					nextQueueItem = &revivingFailure.queueItem
 				}
 			}
@@ -1335,10 +1471,13 @@ func (s *Sequencer) precheckNonces(queueItems []txQueueItem) []txQueueItem {
 					log.Warn("unreachable nonce error is not nonceError")
 					continue
 				}
-				// Retry this transaction if its predecessor appears
+				// nonce 过高说明它可能只是缺少前序交易。
+				// 先把它放进 nonceFailures，等待前一个 nonce 的交易出现后再复活。
 				s.nonceFailures.Add(nonceError, queueItem)
 				continue
 			} else if err != nil {
+				// 其余 nonce 错误（例如 nonce 过低）在当前状态下不可能成功，
+				// 可以直接拒绝，不必进入正式执行阶段。
 				nonceCacheRejectedCounter.Inc(1)
 				queueItem.returnResult(err)
 				continue
@@ -1349,13 +1488,18 @@ func (s *Sequencer) precheckNonces(queueItems []txQueueItem) []txQueueItem {
 		// If neither if condition was hit, then txNonce >= stateNonce && txNonce < pendingNonce
 		// This tx might still go through if previous txs fail.
 		// We'll include it in the output queue in case that happens.
+		//
+		// 典型场景是：当前队列里已经看到了同地址更高优先级/更早位置的交易，
+		// 所以 pendingNonce 已经被推进了，但那些前序交易在正式执行阶段仍有可能失败。
+		// 因此这里不能草率拒绝，仍然要保留给后续排序逻辑决定。
 		outputQueueItems = append(outputQueueItems, queueItem)
 	}
+	// 更新指标，反映还有多少笔交易正因 nonce 过高而暂存在失败缓存中。
 	nonceFailureCacheSizeGauge.Update(int64(s.nonceFailures.Len()))
 	return outputQueueItems
 }
 
-// new
+// resolvePoliciesForQueueItems 为当前候选交易批次解析 endorsement policy，并生成候选区块。
 func (s *Sequencer) resolvePoliciesForQueueItems(
 	ctx context.Context,
 	lastBlockHeader *types.Header,
@@ -1402,21 +1546,24 @@ func (s *Sequencer) resolvePoliciesForQueueItems(
 		}
 
 		result.Txs = append(result.Txs, &CandidateTx{
-			TxIndex:   i,
-			Tx:        item.tx,
-			Receipt:   nil, // 执行前还没有 receipt
-			Policy:    resolution,
+			TxIndex: i,
+			Tx:      item.tx,
+			Receipt: nil, // 执行前还没有 receipt
+			Policy:  resolution,
 		})
 	}
 
 	return result, nil
 }
 
+// createBlock 从队列中拉取交易、执行排序并尝试生成一个新区块。
 func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	var queueItems []txQueueItem
 	seenTxHashes := make(map[common.Hash]struct{})
 
 	defer func() {
+		// createBlock 是 sequencer 的核心路径之一，这里兜底捕获 panic，
+		// 避免某一轮构块异常导致调用方永远收不到结果。
 		panicErr := recover()
 		if panicErr != nil {
 			log.Error("sequencer block creation panicked", "panic", panicErr, "backtrace", string(debug.Stack()))
@@ -1431,6 +1578,8 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	defer nonceFailureCacheSizeGauge.Update(int64(s.nonceFailures.Len()))
 
 	appendQueueItemIfNotDuplicate := func(item txQueueItem) bool {
+		// 构造候选块时按 tx hash 去重，避免同一笔交易被重复加入当前批次。
+		// 这里即使重复来源于不同内部队列，也只保留第一份。
 		if item.tx == nil {
 			return false
 		}
@@ -1452,6 +1601,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	config := s.config()
 	lastBlock := s.execEngine.bc.CurrentBlock()
 
+	// 按最新配置调整 nonce failure cache 容量，并清理已经过期的“nonce 太高”交易。
 	s.nonceFailures.Resize(config.NonceFailureCacheSize)
 	nextNonceExpiryTimer := s.expireNonceFailures()
 	defer func() {
@@ -1464,10 +1614,21 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	sequencerQueueGauge.Update(txQueueLen)
 	sequencerQueueHistogram.Update(txQueueLen)
 
+	// 第一阶段：从多个内部来源收集一批候选交易。
+	// 来源按优先级大致包括：
+	// - 重试队列 txRetryQueue
+	// - timeboost 拍卖结算队列
+	// - 主接收队列 txQueue
+	//
+	// 收集策略并不是“有多少拿多少”，而是：
+	// - 至少等到第一笔交易
+	// - 收到第一笔后继续短暂观察，尽量聚合更多交易进同一块
+	// - 超过读队列窗口后停止收集，进入正式排序流程
 	var startOfReadingFromTxQueue time.Time
 	startOfBlockCreation := time.Now()
 	for {
 		if len(queueItems) == 1 && startOfReadingFromTxQueue.IsZero() {
+			// 第一笔交易进入候选集后，开始计算后续收集窗口。
 			startOfReadingFromTxQueue = time.Now()
 
 			waitForFirstTx := time.Since(startOfBlockCreation)
@@ -1477,12 +1638,14 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 				waitForTxHistogram.Update(waitForFirstTx.Nanoseconds())
 			}
 		} else if len(queueItems) > 1 && time.Since(startOfReadingFromTxQueue) > config.ReadFromTxQueueTimeout {
+			// 收到第一笔后再等一个短窗口，如果已经有多笔交易且窗口到期，就开始构块。
 			break
 		}
 
 		var queueItem txQueueItem
 
 		if s.txRetryQueue.Len() > 0 {
+			// 已经重试过的交易优先于主队列，这样能更快处理上轮因时机问题未完成的交易。
 			select {
 			case queueItem = <-s.timeboostAuctionResolutionTxQueue:
 				log.Debug("Popped the auction resolution tx", "txHash", queueItem.tx.Hash())
@@ -1490,6 +1653,12 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 				queueItem = s.txRetryQueue.Pop()
 			}
 		} else if len(queueItems) == 0 {
+			// 当前还没有任何候选交易时，允许阻塞等待：
+			// - 新交易到达
+			// - 拍卖结算交易到达
+			// - nonce failure 到期
+			// - 切换到 forward 模式
+			// - 上下文结束
 			var nextNonceExpiryChan <-chan time.Time
 			if nextNonceExpiryTimer != nil {
 				nextNonceExpiryChan = nextNonceExpiryTimer.C
@@ -1503,9 +1672,12 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 				case queueItem = <-s.timeboostAuctionResolutionTxQueue:
 					log.Debug("Popped the auction resolution tx", "txHash", queueItem.tx.Hash())
 				case <-nextNonceExpiryChan:
+					// nonce failure 到期后先清理，再继续等待交易。
 					nextNonceExpiryTimer = s.expireNonceFailures()
 					continue
 				case <-s.onForwarderSet:
+					// 如果切到了 forward 模式，本地就不该再继续等待 predecessor，
+					// 清空 nonceFailures，后续由转发路径处理。
 					_, forwarder := s.GetPauseAndForwarder()
 					if forwarder != nil {
 						s.nonceFailures.Clear()
@@ -1518,6 +1690,8 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		} else {
 			done := false
 
+			// 已经至少拿到一笔交易后，不再长时间阻塞；
+			// 尽量把当前队列里“已经就绪”的交易快速收集完。
 			select {
 			case queueItem = <-s.timeboostAuctionResolutionTxQueue:
 				log.Debug("Popped the auction resolution tx", "txHash", queueItem.tx.Hash())
@@ -1533,6 +1707,8 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 
 			if done {
 				if len(queueItems) == 1 && config.ExperimentalBatchingWindow > 0 && !startOfReadingFromTxQueue.IsZero() {
+					// 实验性 batching：只有拿到第一笔交易时，再额外短等一小段时间，
+					// 争取把随后到达的交易并进同一个候选块。
 					elapsed := time.Since(startOfReadingFromTxQueue)
 					remaining := config.ExperimentalBatchingWindow - elapsed
 					if remaining > 0 {
@@ -1559,11 +1735,13 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 				}
 
 				if done {
+					// 当前没有更多可立即收集的交易，结束收集阶段。
 					break
 				}
 			}
 		}
 
+		// 对每个出队交易先做轻量本地校验，把明显无效的情况尽早返回给调用方。
 		err := queueItem.ctx.Err()
 		if err != nil {
 			queueItem.returnResult(err)
@@ -1592,15 +1770,19 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 			continue
 		}
 
+		// 通过所有轻量检查后，再加入本轮候选集。
 		appendQueueItemIfNotDuplicate(queueItem)
 	}
 
+	// 第二阶段：在真正执行前，基于当前状态做一次 nonce 预筛查，
+	// 尽量把“必然太高/太低”的交易提前处理掉。
 	s.nonceCache.Resize(config.NonceCacheSize)
 	s.nonceCache.BeginNewBlock()
 	queueItems = s.precheckNonces(queueItems)
 	maxTxDataSize := s.config().MaxTxDataSize
 
 	if len(queueItems) == 0 {
+		// 本轮虽然可能收到了交易，但经过预检查后没有可继续排序的候选项。
 		return false
 	}
 
@@ -1610,7 +1792,8 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		return true
 	}
 
-	// 执行前策略解析（只对初始候选块做一次）
+	// 第三阶段：如果启用了 endorsement policy，在正式执行前先为初始候选块解析策略。
+	// 这里的结果会挂到 CandidateBlock 上，供后续执行和必要时重建候选块使用。
 	candidateBlock, candierr := s.resolvePoliciesForQueueItems(ctx, lastBlock, queueItems)
 	if candierr != nil {
 		log.Error("failed to resolve endorsement policies", "err", candierr)
@@ -1629,6 +1812,8 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	}
 
 	for rebuildRound := 0; ; rebuildRound++ {
+		// 第四阶段：正式尝试执行当前候选块。
+		// 如果上一轮因为 endorsement 失败要求重建，这里就基于 currentCandidateBlock 继续。
 		currentQueueItems := queueItems
 		if currentCandidateBlock != nil {
 			currentQueueItems = cloneQueueItemsFromCandidateBlock(currentCandidateBlock)
@@ -1642,6 +1827,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 			return false
 		}
 
+		// 把当前轮需要参与排序的 timeboost 交易单独标记出来，传给执行引擎。
 		timeboostedTxs := make(map[common.Hash]struct{})
 		hooks := MakeSequencingHooks(
 			currentQueueItems,
@@ -1678,16 +1864,20 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 			}
 		}
 
+		// 如果当前节点已经不该自己出块，就把这批候选交易转发/回退，而不是继续本地执行。
 		if s.handleInactive(ctx, currentQueueItems) {
 			return false
 		}
 
+		// 构造本轮 L1 incoming message header 所需的父链块高和时间戳。
 		timestamp := time.Now().Unix()
 		s.L1BlockAndTimeMutex.Lock()
 		l1Block := s.l1BlockNumber.Load()
 		l1Timestamp := s.l1Timestamp
 		s.L1BlockAndTimeMutex.Unlock()
 
+		// sequencer 需要确保自己看到的 L1 时间没有明显漂移，
+		// 否则会构造出不可靠的 L2 区块时间戳。
 		if s.l1Reader != nil && (l1Block == 0 || math.Abs(float64(l1Timestamp)-float64(timestamp)) > config.MaxAcceptableTimestampDelta.Seconds()) {
 			for _, queueItem := range currentQueueItems {
 				s.txRetryQueue.Push(queueItem)
@@ -1701,6 +1891,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 			return true
 		}
 
+		// 这是执行引擎要消费的 L1 incoming message header，代表“本轮要注入的 L2 消息”。
 		header := &arbostypes.L1IncomingMessageHeader{
 			Kind:        arbostypes.L1MessageType_L2Message,
 			Poster:      l1pricing.BatchPosterAddress,
@@ -1715,6 +1906,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 			block *types.Block
 			err   error
 		)
+		// 进入执行引擎做真正的交易排序与区块构建。
 		if config.EnableProfiling {
 			block, err = s.execEngine.SequenceTransactionsWithProfiling(header, hooks, timeboostedTxs)
 		} else {
@@ -1737,6 +1929,8 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		}
 
 		if err == nil {
+			// 执行成功后，hooks.txErrors 应该与实际进入排序流程的交易数量一一对应。
+			// 若后面还有未消费的 queueItems，说明它们来不及进入本轮，需要重新入重试队列。
 			if len(hooks.txErrors) != hooks.sequencedQueueItemsCount {
 				err = fmt.Errorf(
 					"unexpected number of error results: %v vs number of txes %v",
@@ -1750,7 +1944,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 			}
 		}
 
-		// endorsement 失败：触发重建
+		// endorsement 失败：根据失败交易列表重建候选块，并在允许的次数内重试执行。
 		var rebuildErr *ErrCandidateBlockRebuildRequired
 		if errors.As(err, &rebuildErr) {
 			if rebuildErr.Decision == nil || rebuildErr.Decision.Rebuild == nil {
@@ -1844,6 +2038,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		}
 
 		if err != nil {
+			// context.Canceled 通常意味着本轮被外部打断，先把交易放回重试队列，等待下一轮。
 			if errors.Is(err, context.Canceled) {
 				for _, item := range currentQueueItems {
 					s.txRetryQueue.Push(item)
@@ -1860,32 +2055,40 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		}
 
 		if block != nil {
+			// 只有真正产出了区块，才能把 nonce 缓存推进到新区块。
 			successfulBlocksCounter.Inc(1)
 			s.nonceCache.Finalize(block)
 		}
 
+		// 第五阶段：把执行结果逐笔回写给调用方，同时把需要延后处理的交易重新缓存/入队。
 		madeBlock := false
 		var blockTxSize int64
 		blockGasLimitReached := false
 		for i, err := range hooks.txErrors {
 			queueItem := currentQueueItems[i]
 			if err == nil {
+				// 没有错误表示这笔交易已经成功进入本轮区块。
 				madeBlock = true
 				blockTxSize += int64(queueItem.txSize)
 				txSizeHistogram.Update(int64(queueItem.txSize))
 			}
 			if errors.Is(err, core.ErrGasLimitReached) {
 				if madeBlock {
+					// 如果区块已经装入了前面的交易，再遇到 gas limit，说明只是这笔及其后续没塞进去，
+					// 它仍有机会在下一块成功，因此重新放回重试队列。
 					blockGasLimitReached = true
 					s.txRetryQueue.Push(queueItem)
 					continue
 				}
 			}
 			if errors.Is(err, core.ErrIntrinsicGas) {
+				// 统一一下错误类型，避免把内部包装后的错误泄漏到上层调用方。
 				err = core.ErrIntrinsicGas
 			}
 			var nonceError NonceError
 			if errors.As(err, &nonceError) && nonceError.txNonce > nonceError.stateNonce {
+				// 正式执行阶段发现 nonce 太高，说明它仍依赖前序交易，
+				// 先放进 nonce failure cache，等 predecessor 到来后再唤醒。
 				s.nonceFailures.Add(nonceError, queueItem)
 				continue
 			}
@@ -1893,6 +2096,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 		}
 
 		if madeBlock {
+			// 记录本轮区块是因为哪类原因停止继续装交易。
 			blockTxSizeHistogram.Update(blockTxSize)
 			if hooks.txSizeLimitReached {
 				dataLimitedBlocksCounter.Inc(1)
@@ -1906,6 +2110,7 @@ func (s *Sequencer) createBlock(ctx context.Context) (returnValue bool) {
 	}
 }
 
+// updateLatestParentChainBlock 用更近的父链头更新本地缓存的 L1 块高和时间戳。
 func (s *Sequencer) updateLatestParentChainBlock(header *types.Header) {
 	s.L1BlockAndTimeMutex.Lock()
 	defer s.L1BlockAndTimeMutex.Unlock()
@@ -1917,6 +2122,7 @@ func (s *Sequencer) updateLatestParentChainBlock(header *types.Header) {
 	}
 }
 
+// Initialize 初始化 sequencer 启动前依赖的父链与地址过滤状态。
 func (s *Sequencer) Initialize(ctx context.Context) error {
 	if s.l1Reader == nil {
 		return nil
@@ -1937,6 +2143,7 @@ func (s *Sequencer) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// InitializeExpressLaneService 创建并挂载 express lane 服务。
 func (s *Sequencer) InitializeExpressLaneService(
 	auctioneerAddr common.Address,
 	roundTimingInfo *timeboost.RoundTimingInfo,
@@ -1964,6 +2171,7 @@ var (
 	blobTxBlobGasPerBlob = big.NewInt(params.BlobTxBlobGasPerBlob)
 )
 
+// logExpectedSurplusError 记录 expected surplus 更新失败日志，并统计连续失败次数。
 func (s *Sequencer) logExpectedSurplusError(err error) {
 	s.expectedSurplusFailureCount++
 
@@ -1977,6 +2185,7 @@ func (s *Sequencer) logExpectedSurplusError(err error) {
 		"consecutiveFailures", s.expectedSurplusFailureCount)
 }
 
+// updateExpectedSurplus 重新计算当前 backlog 对应的预期 L1 surplus。
 func (s *Sequencer) updateExpectedSurplus(ctx context.Context) (int64, error) {
 	header, err := s.l1Reader.LastHeader(ctx)
 	if err != nil {
@@ -2056,12 +2265,14 @@ func (s *Sequencer) updateExpectedSurplus(ctx context.Context) (int64, error) {
 	return expectedSurplus, nil
 }
 
+// StartExpressLaneService 启动 express lane 服务。
 func (s *Sequencer) StartExpressLaneService(ctx context.Context) {
 	if s.expressLaneService != nil {
 		s.expressLaneService.Start(ctx)
 	}
 }
 
+// Start 启动 sequencer 的后台循环，包括父链订阅、surplus 更新和出块任务。
 func (s *Sequencer) Start(ctxIn context.Context) error {
 	s.StopWaiter.Start(ctxIn, s)
 
@@ -2141,6 +2352,7 @@ func (s *Sequencer) Start(ctxIn context.Context) error {
 	return nil
 }
 
+// TxSource 标记关机转发阶段的交易来源队列。
 type TxSource int
 
 const (
@@ -2152,6 +2364,7 @@ const (
 
 var txSources = []string{"unknown", "retryQueue", "nonceFailures", "txQueue", "timeboostAuctionResolutionTxQueue"}
 
+// String 返回交易来源的可读字符串。
 func (s TxSource) String() string {
 	if int(s) > len(txSources) || s < 0 {
 		return txSources[0]
@@ -2159,6 +2372,7 @@ func (s TxSource) String() string {
 	return txSources[s]
 }
 
+// StopAndWait 停止 sequencer，并在可能时把剩余交易转发出去。
 func (s *Sequencer) StopAndWait() {
 	s.StopWaiter.StopAndWait()
 	if s.addressFilterService != nil {
@@ -2223,9 +2437,7 @@ func (s *Sequencer) StopAndWait() {
 	}
 }
 
-
-// new
-// 从 CandidateBlock 中提取出 QueueItems
+// cloneQueueItemsFromCandidateBlock 从候选区块中复制一份 queue items，供重建后重新排序使用。
 func cloneQueueItemsFromCandidateBlock(block *CandidateBlock) []txQueueItem {
 	if block == nil {
 		return nil
