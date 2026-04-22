@@ -143,6 +143,9 @@ func (c *BLSEndorsementClient) RequestEndorsement(
 	if c.KeyStore == nil {
 		return nil, fmt.Errorf("nil BLS key store")
 	}
+	if err := ValidateEndorsementRequest(req); err != nil {
+		return nil, err
+	}
 
 	reject, reason := c.Rules.ShouldReject(endorser, req)
 
@@ -157,6 +160,7 @@ func (c *BLSEndorsementClient) RequestEndorsement(
 	log.Info("ENDORSEMENT_BLS_DECISION",
 		"txHash", req.Envelope.TxHash,
 		"txIndex", req.Envelope.TxIndex,
+		"digest", req.SigningDigest,
 		"to", toStr,
 		"from", fromStr,
 		"endorser", endorser,

@@ -16,14 +16,18 @@ func (c *MockEndorsementClient) RequestEndorsement(
 	endorser endorsementpolicy.EndorserID,
 	req *EndorsementRequest,
 ) (*EndorsementResponse, error) {
-	if req == nil { 
-		return nil, errors.New("nil endorsement request") 
+	if req == nil {
+		return nil, errors.New("nil endorsement request")
 	}
 
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
+	}
+
+	if err := ValidateEndorsementRequest(req); err != nil {
+		return nil, err
 	}
 
 	reject, reason := c.Rules.ShouldReject(endorser, req)
@@ -39,6 +43,7 @@ func (c *MockEndorsementClient) RequestEndorsement(
 	log.Info("ENDORSEMENT_MOCK_DECISION",
 		"txHash", req.Envelope.TxHash,
 		"txIndex", req.Envelope.TxIndex,
+		"digest", req.SigningDigest,
 		"to", toStr,
 		"from", fromStr,
 		"endorser", endorser,
